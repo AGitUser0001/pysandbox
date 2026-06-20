@@ -1,7 +1,6 @@
 import sys
 
-from sandbox.python import PythonRuntime
-from sandbox.runtime import RuntimeLimits
+from . import PythonRuntime, RuntimeLimits
 
 runtime = PythonRuntime(
     limits=RuntimeLimits(

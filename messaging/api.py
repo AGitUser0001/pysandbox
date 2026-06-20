@@ -5,8 +5,8 @@ from collections.abc import Mapping
 from types import CellType, CodeType
 from typing import Any
 
-from messaging.messanger import Messanger
-from messaging.transports import FileTransport
+from .messanger import Messanger
+from .transports import FileTransport
 
 
 class HostCallError(Exception):

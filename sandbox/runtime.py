@@ -607,7 +607,7 @@ class Runtime(abc.ABC):
         wasi_config.inherit_stdin()
         wasi_config.stdout_custom = output.write_stdout
         wasi_config.stderr_custom = output.write_stderr
-        wasi_config.argv = [str(parameters.wasm_path), *parameters.argv]
+        wasi_config.argv = list(parameters.argv)
 
         if parameters.env:
             wasi_config.env = list(parameters.env.items())

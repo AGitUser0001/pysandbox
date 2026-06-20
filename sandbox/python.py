@@ -11,10 +11,10 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
-from messaging.messanger import Messanger
-from sandbox.assets import Asset
-from sandbox.rpc_host import RpcHost
-from sandbox.runtime import (
+from ..messaging.messanger import Messanger
+from .assets import Asset
+from .rpc_host import RpcHost
+from .runtime import (
     Runtime,
     RuntimeError,
     RuntimeExecutionError,
@@ -24,6 +24,9 @@ from sandbox.runtime import (
     RuntimeResult,
     WasmtimeEnvironment,
 )
+
+
+PACKAGE_ROOT = Path(__file__).parents[1]
 
 
 @dataclass(frozen=True)
@@ -230,13 +233,13 @@ class PythonRuntime(Runtime):
     def __init__(
         self,
         *,
-        root: Path = Path("./python-wasi"),
+        root: Path | None = None,
         python_version: str | None = None,
         limits: RuntimeLimits | None = None,
         api: bool = True,
     ) -> None:
         super().__init__(limits=limits)
-        self.root = root
+        self.root = root or PACKAGE_ROOT / "python-wasi"
         self.python_version = python_version
         self.api = api
         self.runtime_asset = Asset(
@@ -313,7 +316,7 @@ class PythonRuntime(Runtime):
 
         return PythonRuntimeParameters(
             wasm_path=install.python_wasm,
-            argv=("-I", "-B"),
+            argv=("python.wasm", "-I", "-B"),
             env=env,
             stdin=stdin,
             mounts=mounts,
@@ -647,7 +650,11 @@ class PythonRuntime(Runtime):
         )
         shutil.copyfile(
             Path(__file__).parents[1] / "messaging" / "api.py",
-            site_packages / "api.py",
+            messaging_package / "api.py",
+        )
+        (site_packages / "api.py").write_text(
+            "from messaging.api import *\n",
+            encoding="utf-8",
         )
 
     def python_asset_filename(self) -> re.Pattern[str]:
