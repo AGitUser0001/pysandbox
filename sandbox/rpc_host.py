@@ -4,6 +4,7 @@ import inspect
 import os
 import select
 import threading
+import time
 import traceback
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -21,10 +22,33 @@ RpcHandler = Callable[[Mapping[str, Any]], Any]
 @dataclass
 class RpcHost:
     handlers: dict[str, RpcHandler] = field(default_factory=dict)
+    _send_lock: threading.RLock = field(default_factory=threading.RLock)
+    _worker_condition: threading.Condition = field(
+        default_factory=lambda: threading.Condition(threading.RLock())
+    )
+    _worker_responses: dict[int, dict[str, Any]] = field(default_factory=dict)
+    _next_worker_request_id: int = 0
 
     def expose(self, method: str, handler: RpcHandler) -> RpcHandler:
         self.handlers[method] = handler
         return handler
+
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        state["_send_lock"] = None
+        state["_worker_condition"] = None
+        state["_worker_responses"] = {}
+        state["_next_worker_request_id"] = 0
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        for key, value in state.items():
+            setattr(self, key, value)
+
+        self._send_lock = threading.RLock()
+        self._worker_condition = threading.Condition(threading.RLock())
+        self._worker_responses = {}
+        self._next_worker_request_id = 0
 
     @property
     def methods(self) -> tuple[str, ...]:
@@ -38,6 +62,7 @@ class RpcHost:
         *,
         max_request_bytes: int,
         on_oversized_request: Callable[[], None],
+        on_messanger_ready: Callable[[Messanger], None] | None = None,
         poll_interval: float = 0.001,
     ) -> None:
         transport = FileTransport(
@@ -47,6 +72,8 @@ class RpcHost:
         )
         messanger = Messanger(transport)
         waiter = request_waiter(request_files, poll_interval=poll_interval)
+        if on_messanger_ready is not None:
+            on_messanger_ready(messanger)
 
         try:
             while not stop.is_set():
@@ -71,9 +98,85 @@ class RpcHost:
 
     def dispatch_next_with(self, messanger: Messanger) -> None:
         message = messanger.receive_message()
+        if self.accept_worker_response(message):
+            return
+
         response = self.response_for_message(message)
         if response is not None:
-            messanger.post_message(response)
+            with self._send_lock:
+                messanger.post_message(response)
+
+    def accept_worker_response(self, message: object) -> bool:
+        if not isinstance(message, dict):
+            return False
+
+        if message.get("type") != "worker_response":
+            return False
+
+        request_id = message.get("id")
+        if not isinstance(request_id, int):
+            return True
+
+        with self._worker_condition:
+            self._worker_responses[request_id] = message
+            self._worker_condition.notify_all()
+
+        return True
+
+    def call_worker(
+        self,
+        messanger: Messanger,
+        fn_path: tuple[str, ...],
+        args: tuple[Any, ...],
+        kwargs: Mapping[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> Any:
+        request_id = self.next_worker_request_id()
+        with self._send_lock:
+            messanger.post_message(
+                {
+                    "type": "worker_call",
+                    "id": request_id,
+                    "fn_path": fn_path,
+                    "args": args,
+                    "kwargs": dict(kwargs),
+                }
+            )
+
+        response = self.wait_worker_response(request_id, timeout=timeout)
+        if response.get("ok"):
+            return response.get("result")
+
+        raise RuntimeError(str(response.get("error")))
+
+    def next_worker_request_id(self) -> int:
+        with self._worker_condition:
+            request_id = self._next_worker_request_id
+            self._next_worker_request_id += 1
+            return request_id
+
+    def wait_worker_response(
+        self,
+        request_id: int,
+        *,
+        timeout: float | None,
+    ) -> dict[str, Any]:
+        deadline = None if timeout is None else time.monotonic() + timeout
+
+        with self._worker_condition:
+            while request_id not in self._worker_responses:
+                if deadline is None:
+                    self._worker_condition.wait()
+                    continue
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("worker call timed out")
+
+                self._worker_condition.wait(remaining)
+
+            return self._worker_responses.pop(request_id)
 
     def response_for_message(self, message: object) -> dict[str, Any] | None:
         if not isinstance(message, dict):

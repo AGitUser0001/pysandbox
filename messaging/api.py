@@ -13,7 +13,7 @@ class HostCallError(Exception):
 
 _messanger: Messanger | None = None
 _next_request_id = 0
-__all__: list[str] = []
+__all__: list[str] = ["spin"]
 
 
 def configure(messanger: Messanger) -> None:
@@ -75,6 +75,122 @@ def receive_response(messanger: Messanger, request_id: int) -> object:
             continue
 
         return message
+
+
+def spin() -> None:
+    import sys
+
+    namespace = sys._getframe(1).f_globals
+    messanger = get_messanger()
+
+    while True:
+        message = messanger.receive_message()
+        response = worker_response_for_message(message, namespace)
+        if response is not None:
+            messanger.post_message(response)
+
+
+def worker_response_for_message(
+    message: object,
+    namespace: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(message, dict):
+        return None
+
+    if message.get("type") != "worker_call":
+        return None
+
+    request_id = message.get("id")
+    fn_path = parse_fn_path(message.get("fn_path"))
+    args = message.get("args", ())
+    kwargs = message.get("kwargs", {})
+
+    if fn_path is None:
+        return worker_error_response(request_id, "invalid function path")
+
+    if not isinstance(args, list | tuple):
+        return worker_error_response(request_id, "invalid positional args")
+
+    if not isinstance(kwargs, dict):
+        return worker_error_response(request_id, "invalid keyword args")
+
+    try:
+        fn = resolve_function(fn_path, namespace)
+        result = fn(*args, **kwargs)
+        if is_coroutine(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+
+            return worker_error_response(
+                request_id,
+                "async worker functions are not supported in WASI",
+                error_type="AsyncWorkerFunctionError",
+            )
+    except BaseException as exc:
+        return worker_error_response(
+            request_id,
+            str(exc),
+            error_type=type(exc).__name__,
+        )
+
+    return {
+        "type": "worker_response",
+        "id": request_id,
+        "ok": True,
+        "result": result,
+    }
+
+
+def worker_error_response(
+    request_id: object,
+    message: str,
+    *,
+    error_type: str = "WorkerCallError",
+) -> dict[str, Any]:
+    return {
+        "type": "worker_response",
+        "id": request_id,
+        "ok": False,
+        "error": {
+            "type": error_type,
+            "message": message,
+        },
+    }
+
+
+def parse_fn_path(fn_path: object) -> tuple[str, ...] | None:
+    if not isinstance(fn_path, list | tuple):
+        return None
+
+    if not all(isinstance(part, str) and part for part in fn_path):
+        return None
+
+    return tuple(fn_path)
+
+
+def resolve_function(
+    fn_path: tuple[str, ...],
+    namespace: Mapping[str, Any],
+) -> Any:
+    if not fn_path:
+        raise LookupError("empty function path")
+
+    value = namespace[fn_path[0]]
+    for part in fn_path[1:]:
+        if isinstance(value, Mapping):
+            value = value[part]
+        else:
+            value = getattr(value, part)
+
+    if not callable(value):
+        raise TypeError("resolved object is not callable")
+
+    return value
+
+
+def is_coroutine(value: object) -> bool:
+    return hasattr(value, "send") and hasattr(value, "throw")
 
 
 def get_messanger() -> Messanger:

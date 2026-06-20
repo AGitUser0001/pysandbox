@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import shutil
@@ -6,12 +7,16 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from multiprocessing.context import SpawnProcess
+from multiprocessing.connection import Connection
 from pathlib import Path
+from typing import Any
 
+from messaging.messanger import Messanger
 from sandbox.assets import Asset
 from sandbox.rpc_host import RpcHost
 from sandbox.runtime import (
     Runtime,
+    RuntimeError,
     RuntimeExecutionError,
     RuntimeLimits,
     RuntimeMount,
@@ -136,6 +141,60 @@ class PythonRpcExecution:
     thread: threading.Thread
     stop: threading.Event
     violation: threading.Event
+    messanger_ready: threading.Condition
+    messanger: Messanger | None = None
+
+    def set_messanger(self, messanger: Messanger) -> None:
+        with self.messanger_ready:
+            self.messanger = messanger
+            self.messanger_ready.notify_all()
+
+    def wait_messanger(self, timeout: float | None = None) -> Messanger:
+        with self.messanger_ready:
+            if self.messanger is None:
+                self.messanger_ready.wait(timeout)
+
+            if self.messanger is None:
+                raise TimeoutError("worker messenger was not ready")
+
+            return self.messanger
+
+
+@dataclass
+class Worker:
+    runtime: "PythonRuntime"
+    parameters: "PythonRuntimeParameters"
+    process: SpawnProcess
+    connection: Connection
+    execution: PythonRpcExecution
+    task: asyncio.Task[RuntimeResult]
+
+    async def call(
+        self,
+        fn_path: tuple[str, ...],
+        *args: Any,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        messanger = await asyncio.to_thread(self.execution.wait_messanger, timeout)
+        return await asyncio.to_thread(
+            self.runtime.rpc.call_worker,
+            messanger,
+            fn_path,
+            args,
+            kwargs,
+            timeout=timeout,
+        )
+
+    def terminate(self) -> None:
+        self.process.terminate()
+
+    async def close(self) -> None:
+        self.terminate()
+        try:
+            await self.task
+        except (EOFError, RuntimeError):
+            return
 
 
 def windows_acl_identity() -> str:
@@ -288,6 +347,115 @@ class PythonRuntime(Runtime):
 
         return b"".join(prefix) + source
 
+    async def execute_worker(
+        self,
+        program: str | bytes,
+        *,
+        timeout: float | None = None,
+    ) -> Worker:
+        if not self.api:
+            raise RuntimeExecutionError("Python worker mode requires api=True")
+
+        parameters = self.generate_runtime_parameters(self.worker_program(program))
+        if (
+            not isinstance(parameters, PythonRuntimeParameters)
+            or parameters.message_pipe is None
+        ):
+            raise RuntimeExecutionError("Python worker mode requires a message pipe")
+
+        parent_connection, child_connection = self.create_worker_pipe()
+        process = self.create_worker_process(
+            parameters,
+            child_connection,
+            timeout=timeout,
+        )
+        self.before_worker_start(parameters)
+        try:
+            with self.suppress_main_module_fixup():
+                process.start()
+        except BaseException:
+            parent_connection.close()
+            child_connection.close()
+            self.after_worker_finish(parameters)
+            raise
+
+        child_connection.close()
+        execution = self.rpc_execution_for(parameters)
+        if execution is None:
+            parent_connection.close()
+            self.after_worker_finish(parameters)
+            raise RuntimeExecutionError("Python worker RPC execution was not started")
+
+        task = asyncio.create_task(
+            self.finish_worker_process(
+                parent_connection,
+                parameters,
+                process,
+                timeout=timeout,
+            )
+        )
+        return Worker(
+            runtime=self,
+            parameters=parameters,
+            process=process,
+            connection=parent_connection,
+            execution=execution,
+            task=task,
+        )
+
+    def worker_program(self, program: str | bytes) -> bytes:
+        source = program.encode("utf-8") if isinstance(program, str) else program
+        return source + b"\nspin()\n"
+
+    async def finish_worker_process(
+        self,
+        connection: Connection,
+        parameters: PythonRuntimeParameters,
+        process: SpawnProcess,
+        *,
+        timeout: float | None,
+    ) -> RuntimeResult:
+        return await asyncio.to_thread(
+            self.finish_worker_process_sync,
+            connection,
+            parameters,
+            process,
+            timeout=timeout,
+        )
+
+    def finish_worker_process_sync(
+        self,
+        connection: Connection,
+        parameters: PythonRuntimeParameters,
+        process: SpawnProcess,
+        *,
+        timeout: float | None,
+    ) -> RuntimeResult:
+        try:
+            try:
+                response = self.recv_worker_response(
+                    connection,
+                    parameters,
+                    process,
+                    timeout=timeout,
+                )
+            finally:
+                connection.close()
+
+            process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+                process.join()
+
+            if isinstance(response, RuntimeResult):
+                return response
+
+            raise RuntimeExecutionError(
+                f"{response.error_type}: {response.message}\n{response.traceback}"
+            )
+        finally:
+            self.after_worker_finish(parameters)
+
     def before_execution(
         self,
         environment: WasmtimeEnvironment,
@@ -304,6 +472,12 @@ class PythonRuntime(Runtime):
 
         stop = threading.Event()
         violation = threading.Event()
+        execution = PythonRpcExecution(
+            thread=threading.Thread(),
+            stop=stop,
+            violation=violation,
+            messanger_ready=threading.Condition(threading.RLock()),
+        )
         thread = threading.Thread(
             target=self.rpc.dispatch_file_forever,
             args=(
@@ -314,15 +488,12 @@ class PythonRuntime(Runtime):
             kwargs={
                 "max_request_bytes": self.limits.max_rpc_message_bytes,
                 "on_oversized_request": violation.set,
+                "on_messanger_ready": execution.set_messanger,
             },
             name="python-rpc-host",
             daemon=True,
         )
-        execution = PythonRpcExecution(
-            thread=thread,
-            stop=stop,
-            violation=violation,
-        )
+        execution.thread = thread
         with self._active_rpc_lock:
             self._active_rpc_executions[parameters.message_pipe.host_dir] = execution
 

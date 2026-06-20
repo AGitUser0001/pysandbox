@@ -21,12 +21,12 @@ def main() -> None:
         )
 
     runtime = PythonRuntime(limits=RuntimeLimits(
-        fuel=25_000_000_000,
-        replenish_fuel_interval=5
+        fuel=10_000_000_000,
+        replenish_fuel_interval=30
     ))
     runtime.rpc.expose("add", add)
 
-    result = runtime.execute(source, timeout=10)
+    result = runtime.execute(source, timeout=30)
 
     print(f"exit code: {result.exit_code}")
     print(
