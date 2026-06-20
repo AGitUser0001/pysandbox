@@ -1,6 +1,8 @@
 import keyword
 import os
+import builtins
 from collections.abc import Mapping
+from types import CellType, CodeType
 from typing import Any
 
 from messaging.messanger import Messanger
@@ -92,7 +94,7 @@ def spin() -> None:
 
 def worker_response_for_message(
     message: object,
-    namespace: Mapping[str, Any],
+    namespace: dict[str, Any],
 ) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return None
@@ -171,12 +173,22 @@ def parse_fn_path(fn_path: object) -> tuple[str, ...] | None:
 
 def resolve_function(
     fn_path: tuple[str, ...],
-    namespace: Mapping[str, Any],
+    namespace: dict[str, Any],
 ) -> Any:
     if not fn_path:
         raise LookupError("empty function path")
 
-    value = namespace[fn_path[0]]
+    if fn_path == ("exec",):
+        return make_exec(namespace)
+
+    if fn_path == ("eval",):
+        return make_eval(namespace)
+
+    if fn_path[0] in namespace:
+        value = namespace[fn_path[0]]
+    else:
+        value = getattr(builtins, fn_path[0])
+
     for part in fn_path[1:]:
         if isinstance(value, Mapping):
             value = value[part]
@@ -187,6 +199,49 @@ def resolve_function(
         raise TypeError("resolved object is not callable")
 
     return value
+
+
+def make_exec(namespace: dict[str, Any]):
+    def exec_in_namespace(
+        source: str | bytes | CodeType,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        *,
+        closure: tuple[CellType, ...] | None = None,
+    ) -> None:
+        if globals is None and locals is None:
+            globals = namespace
+            locals = namespace
+        elif globals is None:
+            globals = namespace
+        elif globals is not None and locals is None:
+            locals = globals
+
+        if closure is None:
+            builtins.exec(source, globals, locals)
+        else:
+            builtins.exec(source, globals, locals, closure=closure)
+
+    return exec_in_namespace
+
+
+def make_eval(namespace: dict[str, Any]):
+    def eval_in_namespace(
+        source: str | bytes | CodeType,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+    ) -> Any:
+        if globals is None and locals is None:
+            globals = namespace
+            locals = namespace
+        elif globals is None:
+            globals = namespace
+        elif globals is not None and locals is None:
+            locals = globals
+
+        return builtins.eval(source, globals, locals)
+
+    return eval_in_namespace
 
 
 def is_coroutine(value: object) -> bool:
