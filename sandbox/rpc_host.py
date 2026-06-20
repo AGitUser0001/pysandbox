@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import os
 import struct
 import threading
@@ -154,7 +156,7 @@ class RpcHost:
             return self.error_response(request_id, f"unknown method: {method}")
 
         try:
-            result = handler(params)
+            result = resolve_handler_result(handler(params))
         except BaseException as exc:
             return self.error_response(
                 request_id,
@@ -255,3 +257,10 @@ def frame_payload_size(data: bytes) -> int:
         FRAME_HEADER_FORMAT,
         data[FRAME_HEADER_SIZE : FRAME_HEADER_SIZE * 2],
     )[0]
+
+
+def resolve_handler_result(result: Any) -> Any:
+    if not inspect.iscoroutine(result):
+        return result
+
+    return asyncio.run(result)
