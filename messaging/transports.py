@@ -13,8 +13,8 @@ DEFAULT_ROTATE_AFTER_BYTES = 1024 * 1024
 
 @dataclass
 class FileTransport:
-    read_path: str | Path
-    write_path: str | Path
+    read_paths: tuple[str | Path, str | Path]
+    write_paths: tuple[str | Path, str | Path]
     poll_interval: float = 0.001
     rotate_after_bytes: int = DEFAULT_ROTATE_AFTER_BYTES
     read_index: int = 0
@@ -40,11 +40,11 @@ class FileTransport:
 
     @property
     def read_file(self) -> Path:
-        return self.file_for(self.read_path, self.read_index)
+        return Path(self.read_paths[self.read_index])
 
     @property
     def write_file(self) -> Path:
-        return self.file_for(self.write_path, self.write_index)
+        return Path(self.write_paths[self.write_index])
 
     def read_data_frame(self) -> bytes:
         while True:
@@ -60,7 +60,7 @@ class FileTransport:
             if frame_type == SWITCH_FRAME:
                 previous_index = self.read_index
                 self.read_index = 1 - self.read_index
-                self.truncate_file(self.file_for(self.read_path, previous_index))
+                self.truncate_file(Path(self.read_paths[previous_index]))
                 self.offsets[previous_index] = 0
                 continue
 
@@ -94,7 +94,7 @@ class FileTransport:
         if current_size + self.frame_size(packet_size) < self.rotate_after_bytes:
             return
 
-        if self.file_size(self.file_for(self.write_path, 1 - self.write_index)) > 0:
+        if self.file_size(Path(self.write_paths[1 - self.write_index])) > 0:
             return
 
         self.append_frame(self.write_file, SWITCH_FRAME, b"")
@@ -111,12 +111,15 @@ class FileTransport:
     def available_bytes(self) -> int:
         return max(0, self.file_size(self.read_file) - self.offsets[self.read_index])
 
+    def total_available_bytes(self) -> int:
+        total = 0
+        for index, path in enumerate(self.read_paths):
+            total += max(0, self.file_size(Path(path)) - self.offsets[index])
+
+        return total
+
     def close(self) -> None:
         return None
-
-    @staticmethod
-    def file_for(base: str | Path, index: int) -> Path:
-        return Path(f"{base}.{index}")
 
     @staticmethod
     def frame_size(payload_size: int) -> int:

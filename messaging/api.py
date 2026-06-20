@@ -22,13 +22,18 @@ def configure(messanger: Messanger) -> None:
 
 
 def configure_from_environment() -> None:
-    request_file = os.environ["PYSANDBOX_RPC_REQUEST_FILE"]
-    response_file = os.environ["PYSANDBOX_RPC_RESPONSE_FILE"]
+    rpc_dir = os.environ["PYSANDBOX_RPC_DIR"]
     configure(
         Messanger(
             FileTransport(
-                read_path=response_file,
-                write_path=request_file,
+                read_paths=(
+                    os.path.join(rpc_dir, "response", "0"),
+                    os.path.join(rpc_dir, "response", "1"),
+                ),
+                write_paths=(
+                    os.path.join(rpc_dir, "request", "0"),
+                    os.path.join(rpc_dir, "request", "1"),
+                ),
             )
         )
     )

@@ -35,34 +35,26 @@ class PythonMessagePipe:
     response_name: str = "response"
 
     @property
-    def request_file(self) -> Path:
+    def request_dir(self) -> Path:
         return self.host_dir / self.request_name
 
     @property
     def request_files(self) -> tuple[Path, Path]:
         return (
-            self.host_dir / f"{self.request_name}.0",
-            self.host_dir / f"{self.request_name}.1",
+            self.request_dir / "0",
+            self.request_dir / "1",
         )
 
     @property
-    def response_file(self) -> Path:
+    def response_dir(self) -> Path:
         return self.host_dir / self.response_name
 
     @property
     def response_files(self) -> tuple[Path, Path]:
         return (
-            self.host_dir / f"{self.response_name}.0",
-            self.host_dir / f"{self.response_name}.1",
+            self.response_dir / "0",
+            self.response_dir / "1",
         )
-
-    @property
-    def guest_request_file(self) -> str:
-        return f"{self.guest_dir}/{self.request_name}"
-
-    @property
-    def guest_response_file(self) -> str:
-        return f"{self.guest_dir}/{self.response_name}"
 
     @classmethod
     def create(cls) -> "PythonMessagePipe":
@@ -70,9 +62,13 @@ class PythonMessagePipe:
         pipe = cls(host_dir=host_dir)
 
         try:
+            pipe.request_dir.mkdir()
+            pipe.response_dir.mkdir()
             for path in (*pipe.request_files, *pipe.response_files):
                 path.write_bytes(b"")
 
+            pipe.request_dir.chmod(0o500)
+            pipe.response_dir.chmod(0o500)
             pipe.host_dir.chmod(0o500)
         except Exception:
             pipe.cleanup()
@@ -82,6 +78,8 @@ class PythonMessagePipe:
 
     def cleanup(self) -> None:
         try:
+            self.request_dir.chmod(0o700)
+            self.response_dir.chmod(0o700)
             self.host_dir.chmod(0o700)
         except OSError:
             pass
@@ -154,8 +152,6 @@ class PythonRuntime(Runtime):
             env.update(
                 {
                     "PYSANDBOX_RPC_DIR": message_pipe.guest_dir,
-                    "PYSANDBOX_RPC_REQUEST_FILE": message_pipe.guest_request_file,
-                    "PYSANDBOX_RPC_RESPONSE_FILE": message_pipe.guest_response_file,
                     "PYSANDBOX_RPC_METHODS": ",".join(self.rpc_methods()),
                 }
             )
@@ -163,8 +159,24 @@ class PythonRuntime(Runtime):
                 RuntimeMount(
                     host=message_pipe.host_dir,
                     guest=message_pipe.guest_dir,
+                    readonly=True,
+                    file_readonly=True,
+                )
+            )
+            mounts.append(
+                RuntimeMount(
+                    host=message_pipe.request_dir,
+                    guest=f"{message_pipe.guest_dir}/{message_pipe.request_name}",
                     readonly=False,
                     file_readonly=False,
+                )
+            )
+            mounts.append(
+                RuntimeMount(
+                    host=message_pipe.response_dir,
+                    guest=f"{message_pipe.guest_dir}/{message_pipe.response_name}",
+                    readonly=True,
+                    file_readonly=True,
                 )
             )
 
@@ -224,8 +236,8 @@ class PythonRuntime(Runtime):
         self._active_rpc_thread = threading.Thread(
             target=self._active_rpc_host.dispatch_file_forever,
             args=(
-                parameters.message_pipe.request_file,
-                parameters.message_pipe.response_file,
+                parameters.message_pipe.request_files,
+                parameters.message_pipe.response_files,
                 self._active_rpc_stop,
             ),
             kwargs={

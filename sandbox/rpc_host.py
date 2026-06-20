@@ -29,8 +29,8 @@ class RpcHost:
 
     def dispatch_file_forever(
         self,
-        request_file: Path,
-        response_file: Path,
+        request_files: tuple[Path, Path],
+        response_files: tuple[Path, Path],
         stop: threading.Event,
         *,
         max_request_bytes: int,
@@ -38,15 +38,15 @@ class RpcHost:
         poll_interval: float = 0.001,
     ) -> None:
         transport = FileTransport(
-            read_path=request_file,
-            write_path=response_file,
+            read_paths=request_files,
+            write_paths=response_files,
             poll_interval=poll_interval,
         )
         messanger = Messanger(transport)
 
         while not stop.is_set():
             try:
-                unread_size = transport.available_bytes()
+                unread_size = transport.total_available_bytes()
             except OSError:
                 time.sleep(poll_interval)
                 continue
