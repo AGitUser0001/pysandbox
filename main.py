@@ -1,14 +1,18 @@
 import sys
-from collections.abc import Mapping
-from typing import Any
 
 from sandbox.python import PythonRuntime
 from sandbox.runtime import RuntimeLimits
 
+runtime = PythonRuntime(
+    limits=RuntimeLimits(
+        fuel=10_000_000_000,
+        replenish_fuel_interval=30
+    )
+)
 
-def add(params: Mapping[str, Any]) -> int:
-    return int(params["a"]) + int(params["b"])
-
+@runtime.rpc.expose
+def add(a: int, b: int) -> int:
+    return int(a) + int(b)
 
 def main() -> None:
     source = sys.stdin.read()
@@ -20,19 +24,12 @@ def main() -> None:
             ]
         )
 
-    runtime = PythonRuntime(limits=RuntimeLimits(
-        fuel=10_000_000_000,
-        replenish_fuel_interval=30
-    ))
-    runtime.rpc.expose("add", add)
-
     result = runtime.execute(source, timeout=30)
 
     print(f"exit code: {result.exit_code}")
     print(
         result.formatted_text(
-            stdout=(b"[stdout] ", None),
-            stderr=(b"[stderr] ", None),
+            stderr=(b"\x1b[31m", b"\x1b[0m"),
         ),
         end="",
     )

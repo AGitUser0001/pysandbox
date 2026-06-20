@@ -41,7 +41,7 @@ def configure_from_environment() -> None:
     )
 
 
-def call(method: str, params: Mapping[str, Any] | None = None) -> Any:
+def call(method: str, *args: Any, **kwargs: Any) -> Any:
     messanger = get_messanger()
     request_id = next_request_id()
     messanger.post_message(
@@ -49,7 +49,8 @@ def call(method: str, params: Mapping[str, Any] | None = None) -> Any:
             "type": "request",
             "id": request_id,
             "method": method,
-            "params": dict(params or {}),
+            "args": args,
+            "kwargs": kwargs,
         }
     )
     message = receive_response(messanger, request_id)
@@ -259,8 +260,8 @@ def next_request_id() -> int:
 
 
 def make_proxy(method: str):
-    def proxy(**params: Any) -> Any:
-        return call(method, params)
+    def proxy(*args: Any, **kwargs: Any) -> Any:
+        return call(method, *args, **kwargs)
 
     proxy.__name__ = method
     proxy.__qualname__ = method

@@ -10,13 +10,14 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, overload
 
 from messaging.messanger import Messanger
 from messaging.transports import FileTransport
 
 
-RpcHandler = Callable[[Mapping[str, Any]], Any]
+RpcHandler = Callable[..., Any]
+RpcHandlerDecorator = Callable[[RpcHandler], RpcHandler]
 
 
 @dataclass
@@ -29,9 +30,43 @@ class RpcHost:
     _worker_responses: dict[int, dict[str, Any]] = field(default_factory=dict)
     _next_worker_request_id: int = 0
 
+    @overload
+    def expose(self, method: str) -> RpcHandlerDecorator:
+        ...
+
+    @overload
+    def expose(self, handler: RpcHandler, /) -> RpcHandler:
+        ...
+
+    @overload
     def expose(self, method: str, handler: RpcHandler) -> RpcHandler:
-        self.handlers[method] = handler
-        return handler
+        ...
+
+    def expose(
+        self,
+        method: str | RpcHandler,
+        handler: RpcHandler | None = None,
+    ) -> RpcHandler | RpcHandlerDecorator:
+        if isinstance(method, str):
+            if handler is None:
+                return self.expose_decorator(method)
+
+            self.handlers[method] = handler
+            return handler
+
+        if handler is not None:
+            raise TypeError("handler cannot be passed when method is inferred")
+
+        inferred_method = rpc_handler_name(method)
+        self.handlers[inferred_method] = method
+        return method
+
+    def expose_decorator(self, method: str) -> RpcHandlerDecorator:
+        def decorate(handler: RpcHandler) -> RpcHandler:
+            self.handlers[method] = handler
+            return handler
+
+        return decorate
 
     def __getstate__(self) -> dict[str, object]:
         state = self.__dict__.copy()
@@ -187,20 +222,32 @@ class RpcHost:
 
         request_id = message.get("id")
         method = message.get("method")
-        params = message.get("params", {})
+        args = message.get("args", ())
+        kwargs = message.get("kwargs", {})
 
         if not isinstance(method, str):
             return self.error_response(request_id, "invalid request method")
 
-        if not isinstance(params, dict):
-            return self.error_response(request_id, "invalid request params")
+        if "params" in message and "args" not in message and "kwargs" not in message:
+            params = message.get("params", {})
+            if not isinstance(params, dict):
+                return self.error_response(request_id, "invalid request params")
+
+            args = ()
+            kwargs = params
+
+        if not isinstance(args, list | tuple):
+            return self.error_response(request_id, "invalid request args")
+
+        if not isinstance(kwargs, dict):
+            return self.error_response(request_id, "invalid request kwargs")
 
         handler = self.handlers.get(method)
         if handler is None:
             return self.error_response(request_id, f"unknown method: {method}")
 
         try:
-            result = resolve_handler_result(handler(params))
+            result = resolve_handler_result(handler(*args, **kwargs))
         except BaseException as exc:
             return self.error_response(
                 request_id,
@@ -240,6 +287,14 @@ class RpcHost:
             "ok": False,
             "error": error,
         }
+
+
+def rpc_handler_name(handler: RpcHandler) -> str:
+    name = getattr(handler, "__name__", None)
+    if not isinstance(name, str) or not name:
+        raise ValueError("RPC handler needs an explicit method name")
+
+    return name
 
 
 def resolve_handler_result(result: Any) -> Any:
