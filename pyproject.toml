@@ -1,0 +1,15 @@
+[project]
+name = "pysandbox"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cbor2>=6",
+    "wasmtime>=45.0.0",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
