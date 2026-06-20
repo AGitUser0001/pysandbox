@@ -1,5 +1,7 @@
+import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -66,9 +68,7 @@ class PythonMessagePipe:
             for path in (*pipe.request_files, *pipe.response_files):
                 path.write_bytes(b"")
 
-            pipe.request_dir.chmod(0o500)
-            pipe.response_dir.chmod(0o500)
-            pipe.host_dir.chmod(0o500)
+            pipe.lock_permissions()
         except Exception:
             pipe.cleanup()
             raise
@@ -76,14 +76,54 @@ class PythonMessagePipe:
         return pipe
 
     def cleanup(self) -> None:
-        try:
-            self.request_dir.chmod(0o700)
-            self.response_dir.chmod(0o700)
-            self.host_dir.chmod(0o700)
-        except OSError:
-            pass
-
+        self.unlock_permissions()
         shutil.rmtree(self.host_dir, ignore_errors=True)
+
+    def lock_permissions(self) -> None:
+        if os.name == "nt":
+            self.lock_permissions_windows()
+        else:
+            self.lock_permissions_posix()
+
+    def unlock_permissions(self) -> None:
+        if os.name == "nt":
+            self.unlock_permissions_windows()
+        else:
+            self.unlock_permissions_posix()
+
+    def lock_permissions_posix(self) -> None:
+        self.request_dir.chmod(0o500)
+        self.response_dir.chmod(0o500)
+        self.host_dir.chmod(0o500)
+
+    def unlock_permissions_posix(self) -> None:
+        for path in (self.request_dir, self.response_dir, self.host_dir):
+            try:
+                path.chmod(0o700)
+            except OSError:
+                pass
+
+    def lock_permissions_windows(self) -> None:
+        user = windows_acl_identity()
+        for directory in (self.host_dir, self.request_dir, self.response_dir):
+            icacls(directory, "/inheritance:r", "/grant:r", f"{user}:RX")
+
+        for path in (*self.request_files, *self.response_files):
+            icacls(path, "/inheritance:r", "/grant:r", f"{user}:F")
+
+    def unlock_permissions_windows(self) -> None:
+        user = windows_acl_identity()
+        for path in (
+            *self.request_files,
+            *self.response_files,
+            self.request_dir,
+            self.response_dir,
+            self.host_dir,
+        ):
+            try:
+                icacls(path, "/grant:r", f"{user}:F")
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                pass
 
 
 @dataclass
@@ -96,6 +136,35 @@ class PythonRpcExecution:
     thread: threading.Thread
     stop: threading.Event
     violation: threading.Event
+
+
+def windows_acl_identity() -> str:
+    username = os.environ.get("USERNAME")
+    domain = os.environ.get("USERDOMAIN")
+
+    if username and domain:
+        return f"{domain}\\{username}"
+
+    if username:
+        return username
+
+    user = os.environ.get("USER")
+    if user:
+        return user
+
+    return "Users"
+
+
+def icacls(path: Path, *args: str) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+
+    subprocess.run(
+        ["icacls", str(path), *args, "/C"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
 
 
 class PythonRuntime(Runtime):
