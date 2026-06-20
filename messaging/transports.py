@@ -2,6 +2,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 
 DATA_FRAME = b"D"
@@ -21,6 +22,8 @@ class FileTransport:
     write_index: int = 0
     offsets: list[int] = field(default_factory=lambda: [0, 0])
     _buffer: bytes = b""
+    _read_streams: list[BinaryIO | None] = field(default_factory=lambda: [None, None])
+    _write_streams: list[BinaryIO | None] = field(default_factory=lambda: [None, None])
 
     def read(self, size: int | None = -1, /) -> bytes:
         while not self._buffer:
@@ -35,7 +38,7 @@ class FileTransport:
 
     def write(self, packet: bytes, /) -> object:
         self.rotate_writer_if_needed(len(packet))
-        self.append_frame(self.write_file, DATA_FRAME, packet)
+        self.append_frame(DATA_FRAME, packet)
         return None
 
     @property
@@ -45,6 +48,24 @@ class FileTransport:
     @property
     def write_file(self) -> Path:
         return Path(self.write_paths[self.write_index])
+
+    @property
+    def read_stream(self) -> BinaryIO:
+        stream = self._read_streams[self.read_index]
+        if stream is None:
+            stream = self.read_file.open("rb", buffering=0)
+            self._read_streams[self.read_index] = stream
+
+        return stream
+
+    @property
+    def write_stream(self) -> BinaryIO:
+        stream = self._write_streams[self.write_index]
+        if stream is None:
+            stream = self.write_file.open("ab", buffering=0)
+            self._write_streams[self.write_index] = stream
+
+        return stream
 
     def read_data_frame(self) -> bytes:
         while True:
@@ -60,26 +81,25 @@ class FileTransport:
             if frame_type == SWITCH_FRAME:
                 previous_index = self.read_index
                 self.read_index = 1 - self.read_index
-                self.truncate_file(Path(self.read_paths[previous_index]))
+                self.truncate_read_file(previous_index)
                 self.offsets[previous_index] = 0
                 continue
 
     def read_next_frame(self) -> tuple[bytes, bytes] | None:
-        path = self.read_file
         offset = self.offsets[self.read_index]
 
         try:
-            with path.open("rb") as stream:
-                stream.seek(offset)
-                header = stream.read(FRAME_HEADER_SIZE)
-                if len(header) < FRAME_HEADER_SIZE:
-                    return None
+            stream = self.read_stream
+            stream.seek(offset)
+            header = stream.read(FRAME_HEADER_SIZE)
+            if len(header) < FRAME_HEADER_SIZE:
+                return None
 
-                frame_type = header[:1]
-                size = struct.unpack(FRAME_HEADER_FORMAT, header[1:])[0]
-                payload = stream.read(size)
-                if len(payload) < size:
-                    return None
+            frame_type = header[:1]
+            size = struct.unpack(FRAME_HEADER_FORMAT, header[1:])[0]
+            payload = stream.read(size)
+            if len(payload) < size:
+                return None
         except FileNotFoundError:
             return None
 
@@ -97,16 +117,17 @@ class FileTransport:
         if self.file_size(Path(self.write_paths[1 - self.write_index])) > 0:
             return
 
-        self.append_frame(self.write_file, SWITCH_FRAME, b"")
+        self.append_frame(SWITCH_FRAME, b"")
         self.write_index = 1 - self.write_index
 
-    def append_frame(self, path: Path, frame_type: bytes, payload: bytes) -> None:
-        with path.open("ab") as stream:
-            stream.write(
-                frame_type
-                + struct.pack(FRAME_HEADER_FORMAT, len(payload))
-                + payload
-            )
+    def append_frame(self, frame_type: bytes, payload: bytes) -> None:
+        stream = self.write_stream
+        stream.write(
+            frame_type
+            + struct.pack(FRAME_HEADER_FORMAT, len(payload))
+            + payload
+        )
+        stream.flush()
 
     def available_bytes(self) -> int:
         return max(0, self.file_size(self.read_file) - self.offsets[self.read_index])
@@ -119,7 +140,9 @@ class FileTransport:
         return total
 
     def close(self) -> None:
-        return None
+        for stream in (*self._read_streams, *self._write_streams):
+            if stream is not None:
+                stream.close()
 
     @staticmethod
     def frame_size(payload_size: int) -> int:
@@ -136,3 +159,11 @@ class FileTransport:
     def truncate_file(path: Path) -> None:
         with path.open("r+b") as stream:
             stream.truncate(0)
+
+    def truncate_read_file(self, index: int) -> None:
+        path = Path(self.read_paths[index])
+        self.truncate_file(path)
+
+        stream = self._read_streams[index]
+        if stream is not None:
+            stream.seek(0)
