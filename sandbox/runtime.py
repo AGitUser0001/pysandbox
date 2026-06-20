@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import multiprocessing as mp
 import multiprocessing.spawn as mp_spawn
 import os
@@ -345,6 +346,14 @@ class Runtime(abc.ABC):
             return response
         finally:
             self.after_worker_finish(parameters)
+
+    async def execute_async(
+        self,
+        program: str | bytes,
+        *,
+        timeout: float | None = None,
+    ) -> RuntimeResult:
+        return await asyncio.to_thread(self.execute, program, timeout=timeout)
 
     def create_worker_pipe(self) -> tuple[Connection, Connection]:
         return self.multiprocessing_context().Pipe(duplex=False)

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from multiprocessing.context import SpawnProcess
 from pathlib import Path
 
-from messaging.messanger import Messanger
 from sandbox.assets import Asset
 from sandbox.rpc_host import RpcHost
 from sandbox.runtime import (
@@ -92,6 +91,13 @@ class PythonRuntimeParameters(RuntimeParameters):
     message_pipe: PythonMessagePipe | None = None
 
 
+@dataclass
+class PythonRpcExecution:
+    thread: threading.Thread
+    stop: threading.Event
+    violation: threading.Event
+
+
 class PythonRuntime(Runtime):
     def __init__(
         self,
@@ -121,11 +127,8 @@ class PythonRuntime(Runtime):
             timeout=120,
         )
         self.rpc = RpcHost()
-        self._active_message_messanger: Messanger | None = None
-        self._active_rpc_host: RpcHost | None = None
-        self._active_rpc_thread: threading.Thread | None = None
-        self._active_rpc_stop: threading.Event | None = None
-        self._active_rpc_violation: threading.Event | None = None
+        self._active_rpc_executions: dict[Path, PythonRpcExecution] = {}
+        self._active_rpc_lock = threading.RLock()
 
     @property
     def name(self) -> str:
@@ -230,34 +233,42 @@ class PythonRuntime(Runtime):
         if parameters.message_pipe is None:
             return
 
-        self._active_rpc_host = self.rpc
-        self._active_rpc_stop = threading.Event()
-        self._active_rpc_violation = threading.Event()
-        self._active_rpc_thread = threading.Thread(
-            target=self._active_rpc_host.dispatch_file_forever,
+        stop = threading.Event()
+        violation = threading.Event()
+        thread = threading.Thread(
+            target=self.rpc.dispatch_file_forever,
             args=(
                 parameters.message_pipe.request_files,
                 parameters.message_pipe.response_files,
-                self._active_rpc_stop,
+                stop,
             ),
             kwargs={
                 "max_request_bytes": self.limits.max_rpc_message_bytes,
-                "on_oversized_request": self._active_rpc_violation.set,
+                "on_oversized_request": violation.set,
             },
             name="python-rpc-host",
             daemon=True,
         )
-        self._active_rpc_thread.start()
+        execution = PythonRpcExecution(
+            thread=thread,
+            stop=stop,
+            violation=violation,
+        )
+        with self._active_rpc_lock:
+            self._active_rpc_executions[parameters.message_pipe.host_dir] = execution
+
+        thread.start()
 
     def check_worker_process(
         self,
         parameters: RuntimeParameters,
         process: SpawnProcess,
     ) -> None:
-        if self._active_rpc_violation is None:
+        execution = self.rpc_execution_for(parameters)
+        if execution is None:
             return
 
-        if not self._active_rpc_violation.is_set():
+        if not execution.violation.is_set():
             return
 
         terminate = getattr(process, "terminate", None)
@@ -282,23 +293,33 @@ class PythonRuntime(Runtime):
         if not isinstance(parameters, PythonRuntimeParameters):
             return
 
-        if self._active_message_messanger is not None:
-            self._active_message_messanger.close()
+        execution: PythonRpcExecution | None = None
+        if parameters.message_pipe is not None:
+            with self._active_rpc_lock:
+                execution = self._active_rpc_executions.pop(
+                    parameters.message_pipe.host_dir,
+                    None,
+                )
 
-        if self._active_rpc_stop is not None:
-            self._active_rpc_stop.set()
-
-        if self._active_rpc_thread is not None:
-            self._active_rpc_thread.join(timeout=1)
+        if execution is not None:
+            execution.stop.set()
+            execution.thread.join(timeout=1)
 
         if parameters.message_pipe is not None:
             parameters.message_pipe.cleanup()
 
-        self._active_message_messanger = None
-        self._active_rpc_host = None
-        self._active_rpc_thread = None
-        self._active_rpc_stop = None
-        self._active_rpc_violation = None
+    def rpc_execution_for(
+        self,
+        parameters: RuntimeParameters,
+    ) -> PythonRpcExecution | None:
+        if not isinstance(parameters, PythonRuntimeParameters):
+            return None
+
+        if parameters.message_pipe is None:
+            return None
+
+        with self._active_rpc_lock:
+            return self._active_rpc_executions.get(parameters.message_pipe.host_dir)
 
     def rpc_methods(self) -> tuple[str, ...]:
         return self.rpc.methods
@@ -316,12 +337,14 @@ class PythonRuntime(Runtime):
     def __getstate__(self) -> dict[str, object]:
         state = self.__dict__.copy()
         state["rpc"] = RpcHost()
-        state["_active_message_messanger"] = None
-        state["_active_rpc_host"] = None
-        state["_active_rpc_thread"] = None
-        state["_active_rpc_stop"] = None
-        state["_active_rpc_violation"] = None
+        state["_active_rpc_executions"] = {}
+        state["_active_rpc_lock"] = None
         return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        for key, value in state.items():
+            setattr(self, key, value)
+        self._active_rpc_lock = threading.RLock()
 
     def ensure_runtime(self) -> PythonWasiInstall:
         existing = self.inspect_runtime()
