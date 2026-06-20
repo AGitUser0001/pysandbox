@@ -209,13 +209,8 @@ def make_exec(namespace: dict[str, Any]):
         *,
         closure: tuple[CellType, ...] | None = None,
     ) -> None:
-        if globals is None and locals is None:
+        if globals is None:
             globals = namespace
-            locals = namespace
-        elif globals is None:
-            globals = namespace
-        elif globals is not None and locals is None:
-            locals = globals
 
         if closure is None:
             builtins.exec(source, globals, locals)
@@ -231,13 +226,8 @@ def make_eval(namespace: dict[str, Any]):
         globals: dict[str, Any] | None = None,
         locals: dict[str, Any] | None = None,
     ) -> Any:
-        if globals is None and locals is None:
+        if globals is None:
             globals = namespace
-            locals = namespace
-        elif globals is None:
-            globals = namespace
-        elif globals is not None and locals is None:
-            locals = globals
 
         return builtins.eval(source, globals, locals)
 
