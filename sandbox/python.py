@@ -31,16 +31,30 @@ class PythonWasiInstall:
 class PythonMessagePipe:
     host_dir: Path
     guest_dir: str = "/__pysandbox_rpc__"
-    request_name: str = "request.cbor"
-    response_name: str = "response.cbor"
+    request_name: str = "request"
+    response_name: str = "response"
 
     @property
     def request_file(self) -> Path:
         return self.host_dir / self.request_name
 
     @property
+    def request_files(self) -> tuple[Path, Path]:
+        return (
+            self.host_dir / f"{self.request_name}.0",
+            self.host_dir / f"{self.request_name}.1",
+        )
+
+    @property
     def response_file(self) -> Path:
         return self.host_dir / self.response_name
+
+    @property
+    def response_files(self) -> tuple[Path, Path]:
+        return (
+            self.host_dir / f"{self.response_name}.0",
+            self.host_dir / f"{self.response_name}.1",
+        )
 
     @property
     def guest_request_file(self) -> str:
@@ -56,8 +70,9 @@ class PythonMessagePipe:
         pipe = cls(host_dir=host_dir)
 
         try:
-            pipe.request_file.write_bytes(b"")
-            pipe.response_file.write_bytes(b"")
+            for path in (*pipe.request_files, *pipe.response_files):
+                path.write_bytes(b"")
+
             pipe.host_dir.chmod(0o500)
         except Exception:
             pipe.cleanup()
@@ -350,6 +365,10 @@ class PythonRuntime(Runtime):
         shutil.copyfile(
             Path(__file__).parents[1] / "messaging" / "messanger.py",
             messaging_package / "messanger.py",
+        )
+        shutil.copyfile(
+            Path(__file__).parents[1] / "messaging" / "transports.py",
+            messaging_package / "transports.py",
         )
         shutil.copyfile(
             Path(__file__).parents[1] / "messaging" / "api.py",

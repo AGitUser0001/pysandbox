@@ -1,4 +1,3 @@
-import os
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,19 +11,14 @@ MessageHandler: TypeAlias = Callable[[Message], None]
 
 HEADER_SIZE = 8
 HEADER_FORMAT = ">Q"
-DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024
 
 
-class MessageReader(Protocol):
+class Transport(Protocol):
     def read(self, size: int | None = -1, /) -> bytes:
         raise NotImplementedError
 
-
-class MessageWriter(Protocol):
-    def write(self, data: bytes, /) -> int | None:
-        raise NotImplementedError
-
-    def flush(self) -> object:
+    def write(self, packet: bytes, /) -> object:
         raise NotImplementedError
 
 
@@ -42,8 +36,7 @@ class MessangerMessageTooLargeError(MessangerError):
 
 @dataclass
 class Messanger:
-    reader: MessageReader
-    writer: MessageWriter
+    transport: Transport
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
 
     def __post_init__(self) -> None:
@@ -52,23 +45,6 @@ class Messanger:
 
         self._handlers: list[MessageHandler] = []
 
-    @classmethod
-    def from_file_descriptors(
-        cls,
-        read_fd: int,
-        write_fd: int,
-        *,
-        closefd: bool = True,
-        max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
-    ) -> "Messanger":
-        reader = os.fdopen(read_fd, "rb", buffering=0, closefd=closefd)
-        writer = os.fdopen(write_fd, "wb", buffering=0, closefd=closefd)
-        return cls(
-            reader=reader,
-            writer=writer,
-            max_message_bytes=max_message_bytes,
-        )
-
     def post_message(self, message: Message) -> None:
         payload = cbor2.dumps(message)
         if len(payload) > self.max_message_bytes:
@@ -76,9 +52,7 @@ class Messanger:
                 f"message exceeds {self.max_message_bytes} bytes"
             )
 
-        self._write_all(struct.pack(HEADER_FORMAT, len(payload)))
-        self._write_all(payload)
-        self.writer.flush()
+        self.transport.write(struct.pack(HEADER_FORMAT, len(payload)) + payload)
 
     def on_message(self, handler: MessageHandler) -> MessageHandler:
         self._handlers.append(handler)
@@ -111,37 +85,18 @@ class Messanger:
             self.dispatch_next()
 
     def close(self) -> None:
-        close_reader = getattr(self.reader, "close", None)
-        close_writer = getattr(self.writer, "close", None)
-
-        if callable(close_reader):
-            close_reader()
-
-        if callable(close_writer):
-            close_writer()
+        close = getattr(self.transport, "close", None)
+        if callable(close):
+            close()
 
     def _read_exact(self, size: int) -> bytes:
         chunks = bytearray()
 
         while len(chunks) < size:
-            chunk = self.reader.read(size - len(chunks))
+            chunk = self.transport.read(size - len(chunks))
             if not chunk:
                 raise MessangerClosedError("message stream closed")
 
             chunks.extend(chunk)
 
         return bytes(chunks)
-
-    def _write_all(self, data: bytes) -> None:
-        written = 0
-
-        while written < len(data):
-            result = self.writer.write(data[written:])
-
-            if result is None:
-                return
-
-            if result <= 0:
-                raise MessangerClosedError("message stream closed")
-
-            written += result
