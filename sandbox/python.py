@@ -22,6 +22,7 @@ from .runtime import (
     RuntimeMount,
     RuntimeParameters,
     RuntimeResult,
+    RuntimeSetupError,
     WasmtimeEnvironment,
 )
 
@@ -316,7 +317,7 @@ class PythonRuntime(Runtime):
 
         return PythonRuntimeParameters(
             wasm_path=install.python_wasm,
-            argv=("python.wasm", "-I", "-B"),
+            argv=("python.wasm", "-I"),
             env=env,
             stdin=stdin,
             mounts=mounts,
@@ -606,12 +607,26 @@ class PythonRuntime(Runtime):
 
     def ensure_guest_packages(self, install: PythonWasiInstall) -> None:
         site_packages = self.site_packages(install)
+        bytecode_marker = site_packages / ".pysandbox-bytecode"
+        changed_files: list[Path] = []
         if not (site_packages / "cbor2" / "__init__.py").is_file():
             source_root = site_packages / ".cbor2-source"
             self.cbor2_asset.fetch(source_root)
-            self.install_cbor2_package(source_root, site_packages / "cbor2")
+            changed_files.extend(
+                self.install_cbor2_package(source_root, site_packages / "cbor2")
+            )
+        elif not bytecode_marker.is_file():
+            changed_files.extend(sorted((site_packages / "cbor2").rglob("*.py")))
+        else:
+            changed_files.extend(
+                python_files_needing_bytecode(site_packages / "cbor2")
+            )
 
-        self.copy_guest_messaging(site_packages)
+        changed_files.extend(self.copy_guest_messaging(site_packages))
+        if not bytecode_marker.is_file():
+            changed_files.extend(self.guest_messaging_files(site_packages))
+
+        self.compile_guest_python_files(install, bytecode_marker, changed_files)
 
     @staticmethod
     def site_packages(install: PythonWasiInstall) -> Path:
@@ -622,7 +637,11 @@ class PythonRuntime(Runtime):
             / "site-packages"
         )
 
-    def install_cbor2_package(self, source_root: Path, destination: Path) -> None:
+    def install_cbor2_package(
+        self,
+        source_root: Path,
+        destination: Path,
+    ) -> list[Path]:
         source = source_root / "cbor2"
         if not (source / "__init__.py").is_file():
             shutil.rmtree(source_root)
@@ -633,29 +652,111 @@ class PythonRuntime(Runtime):
 
         shutil.copytree(source, destination)
         shutil.rmtree(source_root)
+        return sorted(destination.rglob("*.py"))
 
-    def copy_guest_messaging(self, site_packages: Path) -> None:
+    def copy_guest_messaging(self, site_packages: Path) -> list[Path]:
         site_packages.mkdir(parents=True, exist_ok=True)
         messaging_package = site_packages / "messaging"
         messaging_package.mkdir(parents=True, exist_ok=True)
+        changed_files: list[Path] = []
 
-        (messaging_package / "__init__.py").write_text("", encoding="utf-8")
-        shutil.copyfile(
-            Path(__file__).parents[1] / "messaging" / "messanger.py",
+        if write_text_if_changed(messaging_package / "__init__.py", ""):
+            changed_files.append(messaging_package / "__init__.py")
+        elif python_file_needs_bytecode(messaging_package / "__init__.py"):
+            changed_files.append(messaging_package / "__init__.py")
+
+        if copy_file_if_changed(
+            PACKAGE_ROOT / "messaging" / "messanger.py",
             messaging_package / "messanger.py",
-        )
-        shutil.copyfile(
-            Path(__file__).parents[1] / "messaging" / "transports.py",
+        ):
+            changed_files.append(messaging_package / "messanger.py")
+        elif python_file_needs_bytecode(messaging_package / "messanger.py"):
+            changed_files.append(messaging_package / "messanger.py")
+
+        if copy_file_if_changed(
+            PACKAGE_ROOT / "messaging" / "transports.py",
             messaging_package / "transports.py",
-        )
-        shutil.copyfile(
-            Path(__file__).parents[1] / "messaging" / "api.py",
+        ):
+            changed_files.append(messaging_package / "transports.py")
+        elif python_file_needs_bytecode(messaging_package / "transports.py"):
+            changed_files.append(messaging_package / "transports.py")
+
+        if copy_file_if_changed(
+            PACKAGE_ROOT / "messaging" / "api.py",
             messaging_package / "api.py",
-        )
-        (site_packages / "api.py").write_text(
+        ):
+            changed_files.append(messaging_package / "api.py")
+        elif python_file_needs_bytecode(messaging_package / "api.py"):
+            changed_files.append(messaging_package / "api.py")
+
+        if write_text_if_changed(
+            site_packages / "api.py",
             "from messaging.api import *\n",
-            encoding="utf-8",
+        ):
+            changed_files.append(site_packages / "api.py")
+        elif python_file_needs_bytecode(site_packages / "api.py"):
+            changed_files.append(site_packages / "api.py")
+
+        return changed_files
+
+    def guest_messaging_files(self, site_packages: Path) -> list[Path]:
+        return [
+            site_packages / "api.py",
+            site_packages / "messaging" / "__init__.py",
+            site_packages / "messaging" / "api.py",
+            site_packages / "messaging" / "messanger.py",
+            site_packages / "messaging" / "transports.py",
+        ]
+
+    def compile_guest_python_files(
+        self,
+        install: PythonWasiInstall,
+        marker: Path,
+        paths: list[Path],
+    ) -> None:
+        unique_paths = sorted(
+            path
+            for path in set(paths)
+            if path.is_file()
         )
+        if not unique_paths and marker.is_file():
+            return
+
+        guest_paths = [
+            self.guest_runtime_path(install, path)
+            for path in unique_paths
+        ]
+        marker_path = self.guest_runtime_path(install, marker)
+        script = (
+            "import pathlib, py_compile\n"
+            f"paths = {guest_paths!r}\n"
+            "for path in paths:\n"
+            "    py_compile.compile(path, doraise=True)\n"
+            f"pathlib.Path({marker_path!r}).write_text('ok\\n', encoding='utf-8')\n"
+        )
+        result = self.execute_in_worker(
+            RuntimeParameters(
+                wasm_path=install.python_wasm,
+                argv=("python.wasm", "-I"),
+                stdin=script.encode("utf-8"),
+                mounts=[
+                    RuntimeMount(
+                        host=install.runtime_root,
+                        guest="/",
+                        readonly=False,
+                        file_readonly=False,
+                    ),
+                ],
+            ),
+            timeout=30,
+        )
+        if result.exit_code != 0:
+            raise RuntimeSetupError(
+                "failed to compile guest Python files\n"
+                + result.formatted_text(
+                    stderr=(b"[stderr] ", None),
+                )
+            )
 
     def python_asset_filename(self) -> re.Pattern[str]:
         if self.python_version is None:
@@ -714,3 +815,45 @@ class PythonRuntime(Runtime):
         )
 
         return versions[-1] if versions else None
+
+    @staticmethod
+    def guest_runtime_path(install: PythonWasiInstall, path: Path) -> str:
+        relative = path.relative_to(install.runtime_root)
+        return "/" + relative.as_posix()
+
+
+def copy_file_if_changed(source: Path, destination: Path) -> bool:
+    data = source.read_bytes()
+    if destination.is_file() and destination.read_bytes() == data:
+        return False
+
+    destination.write_bytes(data)
+    return True
+
+
+def write_text_if_changed(destination: Path, text: str) -> bool:
+    data = text.encode("utf-8")
+    if destination.is_file() and destination.read_bytes() == data:
+        return False
+
+    destination.write_bytes(data)
+    return True
+
+
+def python_file_needs_bytecode(path: Path) -> bool:
+    if not path.is_file():
+        return False
+
+    cache_dir = path.parent / "__pycache__"
+    return not any(cache_dir.glob(f"{path.stem}.*.pyc"))
+
+
+def python_files_needing_bytecode(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+
+    return [
+        path
+        for path in sorted(root.rglob("*.py"))
+        if python_file_needs_bytecode(path)
+    ]
