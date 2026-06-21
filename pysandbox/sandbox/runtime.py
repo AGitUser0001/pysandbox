@@ -19,6 +19,21 @@ from typing import cast
 import wasmtime
 
 
+__all__ = [
+    "OutputEvent",
+    "Runtime",
+    "RuntimeError",
+    "RuntimeExecutionError",
+    "RuntimeLimits",
+    "RuntimeMount",
+    "RuntimeOutputLimitError",
+    "RuntimeParameters",
+    "RuntimeResult",
+    "RuntimeSetupError",
+    "WasmtimeEnvironment",
+]
+
+
 GetPreparationData = Callable[[str], dict[str, object]]
 
 _suppress_main_module_fixup = ContextVar(

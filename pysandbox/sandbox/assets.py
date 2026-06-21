@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any
 
 
+__all__ = [
+    "Asset",
+    "AssetDigestError",
+    "AssetError",
+    "AssetNotFoundError",
+    "GitHubReleaseAsset",
+]
+
+
 class AssetError(Exception):
     """Base error for asset download and installation failures."""
 

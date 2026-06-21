@@ -1,13 +1,17 @@
 [project]
 name = "pysandbox"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cbor2>=6",
     "wasmtime>=45.0.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.pyright]
 venvPath = "."

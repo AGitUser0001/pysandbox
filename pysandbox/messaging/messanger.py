@@ -6,6 +6,17 @@ from typing import Protocol, TypeAlias
 import cbor2
 
 
+__all__ = [
+    "Message",
+    "MessageHandler",
+    "Messanger",
+    "MessangerClosedError",
+    "MessangerError",
+    "MessangerMessageTooLargeError",
+    "Transport",
+]
+
+
 Message: TypeAlias = object
 MessageHandler: TypeAlias = Callable[[Message], None]
 

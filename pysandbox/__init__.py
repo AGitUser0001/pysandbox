@@ -1,5 +1,5 @@
-from .sandbox.python import PythonRuntime
-from .sandbox.runtime import (
+from .sandbox import (
+    PythonRuntime,
     Runtime,
     RuntimeExecutionError,
     RuntimeLimits,

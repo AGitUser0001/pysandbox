@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import BinaryIO
 
 
+__all__ = [
+    "FileTransport",
+]
+
+
 DATA_FRAME = b"D"
 SWITCH_FRAME = b"S"
 FRAME_HEADER_SIZE = 9

@@ -11,7 +11,7 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
-from ..messaging.messanger import Messanger
+from ..messaging import Messanger
 from .assets import Asset
 from .rpc_host import RpcHost
 from .runtime import (
@@ -25,6 +25,15 @@ from .runtime import (
     RuntimeSetupError,
     WasmtimeEnvironment,
 )
+
+
+__all__ = [
+    "PythonMessagePipe",
+    "PythonRuntime",
+    "PythonRuntimeParameters",
+    "PythonWasiInstall",
+    "Worker",
+]
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -234,13 +243,13 @@ class PythonRuntime(Runtime):
     def __init__(
         self,
         *,
-        root: Path | None = None,
+        root: Path = PACKAGE_ROOT.parent / "python-wasi",
         python_version: str | None = None,
         limits: RuntimeLimits | None = None,
         api: bool = True,
     ) -> None:
         super().__init__(limits=limits)
-        self.root = root or PACKAGE_ROOT / "python-wasi"
+        self.root = root
         self.python_version = python_version
         self.api = api
         self.runtime_asset = Asset(
