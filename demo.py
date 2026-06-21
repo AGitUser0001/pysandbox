@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import textwrap
+import time
 import tokenize
 import traceback
 from types import ModuleType
@@ -24,6 +25,10 @@ RED = "\x1b[31m"
 YELLOW = "\x1b[33m"
 MAGENTA = "\x1b[35m"
 WHITE = "\x1b[37m"
+TYPEWRITER_DELAY = 0.002
+PRESENTATION_PAUSE = 5.0
+PRESENTATION_READING_CHARS_PER_SECOND = 42.0
+PRESENTATION_MIN_PAUSE = 0.6
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +41,83 @@ def parse_args() -> argparse.Namespace:
         help="skip the tutorial and open the host-code playground",
     )
     return parser.parse_args()
+
+
+def typewrite(text: str, *, end: str = "\n") -> None:
+    if not sys.stdout.isatty():
+        print(text, end=end)
+        return
+
+    index = 0
+    while index < len(text):
+        if text[index] == "\x1b":
+            escape_end = index + 1
+            while escape_end < len(text) and text[escape_end] != "m":
+                escape_end += 1
+            sys.stdout.write(text[index : escape_end + 1])
+            index = escape_end + 1
+            continue
+
+        sys.stdout.write(text[index])
+        sys.stdout.flush()
+        time.sleep(TYPEWRITER_DELAY)
+        index += 1
+
+    sys.stdout.write(end)
+    sys.stdout.flush()
+
+
+def presentation_pause(seconds: float = PRESENTATION_PAUSE) -> None:
+    if not sys.stdout.isatty() or not sys.stdin.isatty():
+        return
+
+    interval = seconds / 3
+    sys.stdout.write(DIM)
+    sys.stdout.flush()
+    skipped = False
+
+    for _ in range(3):
+        sys.stdout.write(".")
+        sys.stdout.flush()
+        if wait_for_enter(interval):
+            skipped = True
+            break
+
+    sys.stdout.write(RESET + "\n")
+    sys.stdout.flush()
+
+    if skipped:
+        return
+
+
+def wait_for_enter(seconds: float) -> bool:
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+        except ImportError:
+            time.sleep(seconds)
+            return False
+
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                key = msvcrt.getwch()
+                if key in {"\r", "\n"}:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    try:
+        import select
+    except ImportError:
+        time.sleep(seconds)
+        return False
+
+    if select.select([sys.stdin], [], [], seconds)[0]:
+        sys.stdin.readline()
+        return True
+
+    return False
 
 
 def create_runtime() -> PythonRuntime:
@@ -121,20 +203,48 @@ def worker_call_example() -> str:
 
 
 def section(title: str) -> None:
-    print(f"\n{BOLD}{CYAN}== {title} =={RESET}")
+    typewrite(f"\n{BOLD}{CYAN}== {title} =={RESET}")
 
 
 def paragraph(text: str) -> None:
-    print(textwrap.fill(text, width=88))
+    wrapped = textwrap.fill(text, width=88)
+    typewrite(wrapped)
+    presentation_pause(pause_for_text(wrapped))
+
+
+def pause_for_text(text: str) -> float:
+    visible = strip_ansi(text)
+    length = len(visible.replace("\n", " "))
+    return min(
+        PRESENTATION_PAUSE,
+        max(PRESENTATION_MIN_PAUSE, length / PRESENTATION_READING_CHARS_PER_SECOND),
+    )
+
+
+def strip_ansi(text: str) -> str:
+    stripped: list[str] = []
+    index = 0
+
+    while index < len(text):
+        if text[index] == "\x1b":
+            while index < len(text) and text[index] != "m":
+                index += 1
+            index += 1
+            continue
+
+        stripped.append(text[index])
+        index += 1
+
+    return "".join(stripped)
 
 
 def code_block(source: str) -> None:
     for line in numbered_code_lines(source):
-        print(line)
+        typewrite(line)
 
 
 def step(label: str) -> None:
-    print(f"{YELLOW}{label}{RESET}")
+    typewrite(f"{YELLOW}{label}{RESET}")
 
 
 def prompt(text: str) -> str | None:
@@ -153,22 +263,18 @@ def continue_prompt() -> bool:
     return prompt(f"{DIM}continue...{RESET}") is not None
 
 
-def ellipsis_prompt() -> bool:
-    return prompt(f"{DIM}...{RESET}") is not None
-
-
 def execute_code(runtime: PythonRuntime, source: str) -> None:
     result = runtime.execute(source, timeout=30)
 
-    print(f"exit code: {result.exit_code}")
-    print(
+    typewrite(f"exit code: {result.exit_code}")
+    typewrite(
         result.formatted_text(
             stderr=(f"{RED}[stderr] ".encode(), RESET.encode()),
         ),
         end="",
     )
     if result.text and not result.text.endswith("\n"):
-        print()
+        typewrite("")
 
 
 def one_shot_demo(runtime: PythonRuntime) -> None:
@@ -203,7 +309,7 @@ async def worker_demo(runtime: PythonRuntime) -> None:
                 by=3,
                 timeout=5,
             )
-            print(f"{GREEN}host -> guest worker call{RESET}: {result}")
+            typewrite(f"{GREEN}host -> guest worker call{RESET}: {result}")
             await asyncio.sleep(0.25)
     finally:
         await worker.close()
@@ -268,28 +374,19 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def playground(runtime: PythonRuntime | None = None) -> None:
+def playground() -> None:
     section("playground")
     paragraph("Write a host Python program from start to end. The program can create a runtime, execute one-shot guest code, start long-lived guest workers, or expose host functions for the guest to call.")
-    if not ellipsis_prompt():
-        return
-
-    if runtime is None:
-        print(f"{DIM}No runtime is created yet. Use Alt-1 or write PythonRuntime(...) yourself.{RESET}")
-    else:
-        print(f"{DIM}Host functions exposed to guest code: {', '.join(runtime.rpc.methods)}{RESET}")
+    typewrite(f"{DIM}No runtime is created yet. Use Alt-1 or write PythonRuntime(...) yourself.{RESET}")
 
     host_namespace: dict[str, Any] = {
         "asyncio": asyncio,
         "RuntimeLimits": RuntimeLimits,
         "PythonRuntime": PythonRuntime,
     }
-    if runtime is not None:
-        host_namespace["runtime"] = runtime
 
     while True:
-        print()
-        print(f"{YELLOW}host code{RESET}")
+        typewrite("")
         print_snippets()
         lines = read_repl_block()
         if lines is None:
@@ -299,20 +396,23 @@ def playground(runtime: PythonRuntime | None = None) -> None:
             continue
 
         source = "\n".join(lines)
-        code_block(source)
-        if prompt(f"{YELLOW}try it{DIM} - press Enter to execute...{RESET}") is None:
-            return
+        print_code_block(source)
+        print(f"{BOLD}{YELLOW}executing code...{RESET}")
         execute_host_code(source, host_namespace)
         if not continue_prompt():
             return
 
 
 def print_snippets() -> None:
-    print(f"{DIM}Boilerplate:{RESET}")
+    typewrite(f"{DIM}Snippets:{RESET}")
     for key, label, source in HOST_SNIPPETS:
-        print(f"{DIM}- {key}: {label}{RESET}")
-        code_block(source)
-    print(f"{DIM}{'-' * 72}{RESET}")
+        typewrite(f"{DIM}- {key}: {label}{RESET}")
+    typewrite(f"{DIM}{'-' * 72}{RESET}")
+
+
+def print_code_block(source: str) -> None:
+    for line in numbered_code_lines(source):
+        print(line)
 
 
 def read_repl_block() -> list[str] | None:
@@ -483,7 +583,6 @@ class TerminalBlockEditor:
             while True:
                 key = key_reader.read_key()
                 if key in {"\x03", "\x04"}:
-                    self.clear_render()
                     return None
 
                 if key == "\x12":
@@ -797,10 +896,10 @@ def print_host_result(result: object) -> None:
         return
 
     if isinstance(result, str):
-        print(result, end="" if result.endswith("\n") else "\n")
+        typewrite(result, end="" if result.endswith("\n") else "\n")
         return
 
-    print(repr(result))
+    typewrite(repr(result))
 
 
 def execute_host_code(source: str, namespace: dict[str, Any]) -> None:
@@ -810,7 +909,7 @@ def execute_host_code(source: str, namespace: dict[str, Any]) -> None:
 
         execute_host_statements(source, namespace)
     except BaseException:
-        print(f"{RED}{traceback.format_exc()}{RESET}", end="")
+        typewrite(f"{RED}{traceback.format_exc()}{RESET}", end="")
 
 
 def execute_host_expression(source: str, namespace: dict[str, Any]) -> bool:
@@ -904,10 +1003,8 @@ def main() -> None:
 
     runtime = create_runtime()
 
-    print(f"{BOLD}pysandbox tutorial{RESET}")
+    typewrite(f"{BOLD}pysandbox tutorial{RESET}")
     paragraph("This demo runs WASI CPython in a spawned worker process, exposes host functions over RPC, captures interlaced stdout/stderr, and then starts a long-lived guest worker.")
-    if not ellipsis_prompt():
-        return
 
     section("host setup")
     paragraph("Create a runtime and expose trusted host functions. The guest can call these by name.")
@@ -915,17 +1012,17 @@ def main() -> None:
     code_block(host_setup_example())
     if not run_prompt():
         return
-    print(f"{GREEN}runtime ready{RESET}: exposed methods = {', '.join(runtime.rpc.methods)}")
+    typewrite(f"{GREEN}runtime ready{RESET}: exposed methods = {', '.join(runtime.rpc.methods)}")
     if not continue_prompt():
         return
 
     one_shot_demo(runtime)
     asyncio.run(worker_demo(runtime))
-    playground(runtime)
+    playground()
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print()
+        typewrite("")
