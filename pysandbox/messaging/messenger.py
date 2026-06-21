@@ -9,10 +9,10 @@ import cbor2
 __all__ = [
     "Message",
     "MessageHandler",
-    "Messanger",
-    "MessangerClosedError",
-    "MessangerError",
-    "MessangerMessageTooLargeError",
+    "Messenger",
+    "MessengerClosedError",
+    "MessengerError",
+    "MessengerMessageTooLargeError",
     "Transport",
 ]
 
@@ -33,20 +33,20 @@ class Transport(Protocol):
         raise NotImplementedError
 
 
-class MessangerError(Exception):
+class MessengerError(Exception):
     """Base error for messenger failures."""
 
 
-class MessangerClosedError(MessangerError):
+class MessengerClosedError(MessengerError):
     """Raised when a message stream closes before a full frame is read."""
 
 
-class MessangerMessageTooLargeError(MessangerError):
+class MessengerMessageTooLargeError(MessengerError):
     """Raised when a frame exceeds the configured message size limit."""
 
 
 @dataclass
-class Messanger:
+class Messenger:
     transport: Transport
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
 
@@ -59,7 +59,7 @@ class Messanger:
     def post_message(self, message: Message) -> None:
         payload = cbor2.dumps(message)
         if len(payload) > self.max_message_bytes:
-            raise MessangerMessageTooLargeError(
+            raise MessengerMessageTooLargeError(
                 f"message exceeds {self.max_message_bytes} bytes"
             )
 
@@ -77,7 +77,7 @@ class Messanger:
         (size,) = struct.unpack(HEADER_FORMAT, header)
 
         if size > self.max_message_bytes:
-            raise MessangerMessageTooLargeError(
+            raise MessengerMessageTooLargeError(
                 f"incoming message exceeds {self.max_message_bytes} bytes"
             )
 
@@ -106,7 +106,7 @@ class Messanger:
         while len(chunks) < size:
             chunk = self.transport.read(size - len(chunks))
             if not chunk:
-                raise MessangerClosedError("message stream closed")
+                raise MessengerClosedError("message stream closed")
 
             chunks.extend(chunk)
 

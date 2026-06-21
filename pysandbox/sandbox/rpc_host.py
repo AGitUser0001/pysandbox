@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, overload
 
-from ..messaging import Messanger, FileTransport
+from ..messaging import Messenger, FileTransport
 
 
 __all__ = [
@@ -103,7 +103,7 @@ class RpcHost:
         *,
         max_request_bytes: int,
         on_oversized_request: Callable[[], None],
-        on_messanger_ready: Callable[[Messanger], None] | None = None,
+        on_messenger_ready: Callable[[Messenger], None] | None = None,
         poll_interval: float = 0.001,
     ) -> None:
         transport = FileTransport(
@@ -111,10 +111,10 @@ class RpcHost:
             write_paths=response_files,
             poll_interval=poll_interval,
         )
-        messanger = Messanger(transport)
+        messenger = Messenger(transport)
         waiter = request_waiter(request_files, poll_interval=poll_interval)
-        if on_messanger_ready is not None:
-            on_messanger_ready(messanger)
+        if on_messenger_ready is not None:
+            on_messenger_ready(messenger)
 
         try:
             while not stop.is_set():
@@ -132,20 +132,20 @@ class RpcHost:
                     waiter.wait(stop)
                     continue
 
-                self.dispatch_next_with(messanger)
+                self.dispatch_next_with(messenger)
         finally:
             waiter.close()
-            messanger.close()
+            messenger.close()
 
-    def dispatch_next_with(self, messanger: Messanger) -> None:
-        message = messanger.receive_message()
+    def dispatch_next_with(self, messenger: Messenger) -> None:
+        message = messenger.receive_message()
         if self.accept_worker_response(message):
             return
 
         response = self.response_for_message(message)
         if response is not None:
             with self._send_lock:
-                messanger.post_message(response)
+                messenger.post_message(response)
 
     def accept_worker_response(self, message: object) -> bool:
         if not isinstance(message, dict):
@@ -166,7 +166,7 @@ class RpcHost:
 
     def call_worker(
         self,
-        messanger: Messanger,
+        messenger: Messenger,
         fn_path: tuple[str, ...],
         args: tuple[Any, ...],
         kwargs: Mapping[str, Any],
@@ -175,7 +175,7 @@ class RpcHost:
     ) -> Any:
         request_id = self.next_worker_request_id()
         with self._send_lock:
-            messanger.post_message(
+            messenger.post_message(
                 {
                     "type": "worker_call",
                     "id": request_id,

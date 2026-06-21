@@ -79,7 +79,7 @@ print(
 - Wasmtime loads `python.wasm`; WASI preopens the runtime at `/`.
 - stdin is fed from memory through the worker stdin pipe.
 - stdout and stderr are captured through Wasmtime custom stream callbacks.
-- RPC messages are CBOR packets framed by `messaging.Messanger`.
+- RPC messages are CBOR packets framed by `messaging.Messenger`.
 - The guest receives a tiny `api.py` shim plus the `messaging` package in `/lib/.../site-packages`.
 - The RPC transport uses two rotating request files and two rotating response files under `/__pysandbox_rpc__`.
 - Request files are writable by the guest; response files and runtime files are readonly during normal execution.

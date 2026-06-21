@@ -11,7 +11,7 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
-from ..messaging import Messanger
+from ..messaging import Messenger
 from .assets import Asset
 from .rpc_host import RpcHost
 from .runtime import (
@@ -154,23 +154,23 @@ class PythonRpcExecution:
     thread: threading.Thread
     stop: threading.Event
     violation: threading.Event
-    messanger_ready: threading.Condition
-    messanger: Messanger | None = None
+    messenger_ready: threading.Condition
+    messenger: Messenger | None = None
 
-    def set_messanger(self, messanger: Messanger) -> None:
-        with self.messanger_ready:
-            self.messanger = messanger
-            self.messanger_ready.notify_all()
+    def set_messenger(self, messenger: Messenger) -> None:
+        with self.messenger_ready:
+            self.messenger = messenger
+            self.messenger_ready.notify_all()
 
-    def wait_messanger(self, timeout: float | None = None) -> Messanger:
-        with self.messanger_ready:
-            if self.messanger is None:
-                self.messanger_ready.wait(timeout)
+    def wait_messenger(self, timeout: float | None = None) -> Messenger:
+        with self.messenger_ready:
+            if self.messenger is None:
+                self.messenger_ready.wait(timeout)
 
-            if self.messanger is None:
+            if self.messenger is None:
                 raise TimeoutError("worker messenger was not ready")
 
-            return self.messanger
+            return self.messenger
 
 
 @dataclass
@@ -189,10 +189,10 @@ class Worker:
         timeout: float | None = None,
         **kwargs: Any,
     ) -> Any:
-        messanger = await asyncio.to_thread(self.execution.wait_messanger, timeout)
+        messenger = await asyncio.to_thread(self.execution.wait_messenger, timeout)
         return await asyncio.to_thread(
             self.runtime.rpc.call_worker,
-            messanger,
+            messenger,
             fn_path,
             args,
             kwargs,
@@ -489,7 +489,7 @@ class PythonRuntime(Runtime):
             thread=threading.Thread(),
             stop=stop,
             violation=violation,
-            messanger_ready=threading.Condition(threading.RLock()),
+            messenger_ready=threading.Condition(threading.RLock()),
         )
         thread = threading.Thread(
             target=self.rpc.dispatch_file_forever,
@@ -501,7 +501,7 @@ class PythonRuntime(Runtime):
             kwargs={
                 "max_request_bytes": self.limits.max_rpc_message_bytes,
                 "on_oversized_request": violation.set,
-                "on_messanger_ready": execution.set_messanger,
+                "on_messenger_ready": execution.set_messenger,
             },
             name="python-rpc-host",
             daemon=True,
@@ -668,6 +668,9 @@ class PythonRuntime(Runtime):
         messaging_package = site_packages / "messaging"
         messaging_package.mkdir(parents=True, exist_ok=True)
         changed_files: list[Path] = []
+        stale_messaging_file = messaging_package / ("messa" + "nger.py")
+        if stale_messaging_file.exists():
+            stale_messaging_file.unlink()
 
         if write_text_if_changed(messaging_package / "__init__.py", ""):
             changed_files.append(messaging_package / "__init__.py")
@@ -675,12 +678,12 @@ class PythonRuntime(Runtime):
             changed_files.append(messaging_package / "__init__.py")
 
         if copy_file_if_changed(
-            PACKAGE_ROOT / "messaging" / "messanger.py",
-            messaging_package / "messanger.py",
+            PACKAGE_ROOT / "messaging" / "messenger.py",
+            messaging_package / "messenger.py",
         ):
-            changed_files.append(messaging_package / "messanger.py")
-        elif python_file_needs_bytecode(messaging_package / "messanger.py"):
-            changed_files.append(messaging_package / "messanger.py")
+            changed_files.append(messaging_package / "messenger.py")
+        elif python_file_needs_bytecode(messaging_package / "messenger.py"):
+            changed_files.append(messaging_package / "messenger.py")
 
         if copy_file_if_changed(
             PACKAGE_ROOT / "messaging" / "transports.py",
@@ -713,7 +716,7 @@ class PythonRuntime(Runtime):
             site_packages / "api.py",
             site_packages / "messaging" / "__init__.py",
             site_packages / "messaging" / "api.py",
-            site_packages / "messaging" / "messanger.py",
+            site_packages / "messaging" / "messenger.py",
             site_packages / "messaging" / "transports.py",
         ]
 

@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from types import CellType, CodeType
 from typing import Any
 
-from .messanger import Messanger
+from .messenger import Messenger
 from .transports import FileTransport
 
 
@@ -13,20 +13,20 @@ class HostCallError(Exception):
     pass
 
 
-_messanger: Messanger | None = None
+_messenger: Messenger | None = None
 _next_request_id = 0
 __all__: list[str] = ["spin"]
 
 
-def configure(messanger: Messanger) -> None:
-    global _messanger
-    _messanger = messanger
+def configure(messenger: Messenger) -> None:
+    global _messenger
+    _messenger = messenger
 
 
 def configure_from_environment() -> None:
     rpc_dir = os.environ["PYSANDBOX_RPC_DIR"]
     configure(
-        Messanger(
+        Messenger(
             FileTransport(
                 read_paths=(
                     os.path.join(rpc_dir, "response", "0"),
@@ -42,9 +42,9 @@ def configure_from_environment() -> None:
 
 
 def call(method: str, *args: Any, **kwargs: Any) -> Any:
-    messanger = get_messanger()
+    messenger = get_messenger()
     request_id = next_request_id()
-    messanger.post_message(
+    messenger.post_message(
         {
             "type": "request",
             "id": request_id,
@@ -53,7 +53,7 @@ def call(method: str, *args: Any, **kwargs: Any) -> Any:
             "kwargs": kwargs,
         }
     )
-    message = receive_response(messanger, request_id)
+    message = receive_response(messenger, request_id)
 
     if not isinstance(message, dict):
         raise HostCallError("invalid host response")
@@ -65,9 +65,9 @@ def call(method: str, *args: Any, **kwargs: Any) -> Any:
     raise HostCallError(str(error))
 
 
-def receive_response(messanger: Messanger, request_id: int) -> object:
+def receive_response(messenger: Messenger, request_id: int) -> object:
     while True:
-        message = messanger.receive_message()
+        message = messenger.receive_message()
         if not isinstance(message, dict):
             continue
 
@@ -84,13 +84,13 @@ def spin() -> None:
     import sys
 
     namespace = sys._getframe(1).f_globals
-    messanger = get_messanger()
+    messenger = get_messenger()
 
     while True:
-        message = messanger.receive_message()
+        message = messenger.receive_message()
         response = worker_response_for_message(message, namespace)
         if response is not None:
-            messanger.post_message(response)
+            messenger.post_message(response)
 
 
 def worker_response_for_message(
@@ -239,16 +239,16 @@ def is_coroutine(value: object) -> bool:
     return hasattr(value, "send") and hasattr(value, "throw")
 
 
-def get_messanger() -> Messanger:
-    global _messanger
+def get_messenger() -> Messenger:
+    global _messenger
 
-    if _messanger is None:
+    if _messenger is None:
         configure_from_environment()
 
-    if _messanger is None:
+    if _messenger is None:
         raise HostCallError("host messenger is not configured")
 
-    return _messanger
+    return _messenger
 
 
 def next_request_id() -> int:
