@@ -10,6 +10,7 @@ import textwrap
 import time
 import tokenize
 import traceback
+from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, Protocol
 
@@ -388,15 +389,18 @@ def playground() -> None:
     while True:
         typewrite("")
         print_snippets()
-        lines = read_repl_block()
-        if lines is None:
+        editor_result = read_repl_block()
+        if editor_result is None:
             return
 
-        if not lines:
+        if not editor_result.lines:
             continue
 
-        source = "\n".join(lines)
+        source = "\n".join(editor_result.lines)
         print_code_block(source)
+        if not editor_result.execute:
+            return
+
         print(f"{BOLD}{YELLOW}executing code...{RESET}")
         execute_host_code(source, host_namespace)
         if not continue_prompt():
@@ -415,7 +419,13 @@ def print_code_block(source: str) -> None:
         print(line)
 
 
-def read_repl_block() -> list[str] | None:
+@dataclass(frozen=True)
+class EditorResult:
+    lines: list[str]
+    execute: bool
+
+
+def read_repl_block() -> EditorResult | None:
     if not sys.stdin.isatty():
         return read_line_repl_block()
 
@@ -438,7 +448,7 @@ def read_repl_block() -> list[str] | None:
     return editor.read(PosixKeyReader(termios, tty))
 
 
-def read_line_repl_block() -> list[str] | None:
+def read_line_repl_block() -> EditorResult | None:
     lines: list[str] = []
 
     while True:
@@ -449,11 +459,8 @@ def read_line_repl_block() -> list[str] | None:
         if line == ":quit":
             return None
 
-        if line == ":suggest" and not lines:
-            return [line]
-
         if not line:
-            return lines
+            return EditorResult(lines=lines, execute=True)
 
         lines.append(line)
 
@@ -577,13 +584,17 @@ class TerminalBlockEditor:
         )
         self.ensure_cursor_visible()
 
-    def read(self, key_reader: KeyReader) -> list[str] | None:
+    def read(self, key_reader: KeyReader) -> EditorResult | None:
         with key_reader:
             self.redraw()
             while True:
                 key = key_reader.read_key()
                 if key in {"\x03", "\x04"}:
-                    return None
+                    self.clear_render()
+                    if not self.source.strip():
+                        return None
+
+                    return EditorResult(lines=self.lines, execute=False)
 
                 if key == "\x12":
                     if not self.source.strip():
@@ -591,7 +602,7 @@ class TerminalBlockEditor:
 
                     self.clear_render()
 
-                    return self.lines
+                    return EditorResult(lines=self.lines, execute=True)
 
                 self.handle_key(key)
                 self.redraw()
