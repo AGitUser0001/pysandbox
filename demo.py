@@ -293,7 +293,9 @@ async def worker_demo(runtime: PythonRuntime) -> None:
     section("long-lived worker")
     paragraph("A worker keeps guest state alive. The host can call functions or methods inside that worker through the same RPC channel.")
     step("demo")
+    step("[worker]")
     code_block(worker_program())
+    step("[host]")
     code_block(worker_call_example())
     if not run_prompt():
         return
