@@ -8,6 +8,7 @@ from .sandbox import (
     RuntimeParameters,
     RuntimeResult,
     RuntimeSetupError,
+    Worker,
 )
 
 
@@ -21,4 +22,5 @@ __all__ = [
     "RuntimeParameters",
     "RuntimeResult",
     "RuntimeSetupError",
+    "Worker",
 ]

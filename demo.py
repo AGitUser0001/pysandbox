@@ -191,7 +191,7 @@ def worker_program() -> str:
 def worker_call_example() -> str:
     return textwrap.dedent(
         """
-        worker = await runtime.execute_worker(worker_program, timeout=30)
+        worker = runtime.run(worker_program, spin=True, timeout=30)
         try:
             for value in range(3):
                 result = await worker.call(("calculator", "scale"), value + 5, by=3, timeout=5)
@@ -300,8 +300,9 @@ async def worker_demo(runtime: PythonRuntime) -> None:
     if not run_prompt():
         return
 
-    worker = await runtime.execute_worker(
+    worker = runtime.run(
         worker_program(),
+        spin=True,
         timeout=30,
     )
     try:
@@ -364,7 +365,7 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
         textwrap.dedent(
             """
             async def main() -> None:
-                worker = await runtime.execute_worker("value = 41", timeout=30)
+                worker = runtime.run("value = 41", spin=True, timeout=30)
                 try:
                     print(await worker.call(("eval",), "value + 1", timeout=5))
                 finally:

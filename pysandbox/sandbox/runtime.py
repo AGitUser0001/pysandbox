@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import traceback
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from multiprocessing.context import SpawnContext, SpawnProcess
@@ -31,6 +31,7 @@ __all__ = [
     "RuntimeResult",
     "RuntimeSetupError",
     "WasmtimeEnvironment",
+    "Worker",
 ]
 
 
@@ -102,6 +103,9 @@ class RuntimeParameters:
     env: dict[str, str] = field(default_factory=dict)
     stdin: bytes = b""
     mounts: list[RuntimeMount] = field(default_factory=list)
+
+
+RuntimeStartCallback = Callable[[SpawnProcess, object | None], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,30 +327,148 @@ class Runtime(abc.ABC):
     def generate_runtime_parameters(self, program: str | bytes) -> RuntimeParameters:
         raise NotImplementedError
 
-    def execute(self, program: str | bytes, *, timeout: float | None = None) -> RuntimeResult:
+    def execute(
+        self,
+        program: str | bytes,
+        *,
+        timeout: float | None = None,
+        after_start: RuntimeStartCallback | None = None,
+    ) -> RuntimeResult:
         parameters = self.generate_runtime_parameters(program)
-        parent_connection, child_connection = self.create_worker_pipe()
+        parent_connection, process, execution = self.start_worker_process(
+            parameters,
+            timeout=timeout,
+            after_start=after_start,
+        )
 
+        return self.finish_worker_process_sync(
+            parent_connection,
+            parameters,
+            process,
+            execution,
+            timeout=timeout,
+        )
+
+    def run(
+        self,
+        program: str | bytes,
+        *,
+        timeout: float | None = None,
+        after_start: RuntimeStartCallback | None = None,
+    ) -> "Worker":
+        loop = asyncio.get_running_loop()
+        execution_future: asyncio.Future[object | None] = loop.create_future()
+        process_box: list[SpawnProcess] = []
+
+        def set_execution_result(value: object | None) -> None:
+            if not execution_future.done():
+                execution_future.set_result(value)
+
+        def set_execution_exception(exc: BaseException) -> None:
+            if not execution_future.done():
+                execution_future.set_exception(exc)
+
+        def capture_start(
+            process: SpawnProcess,
+            execution: object | None,
+        ) -> None:
+            process_box.append(process)
+            if after_start is not None:
+                after_start(process, execution)
+
+            loop.call_soon_threadsafe(set_execution_result, execution)
+
+        def execute_in_thread() -> RuntimeResult:
+            try:
+                return self.execute(
+                    program,
+                    timeout=timeout,
+                    after_start=capture_start,
+                )
+            except BaseException as exc:
+                loop.call_soon_threadsafe(set_execution_exception, exc)
+                raise
+
+        async def wait_result() -> RuntimeResult:
+            try:
+                return await asyncio.to_thread(execute_in_thread)
+            except asyncio.CancelledError:
+                if process_box:
+                    self.terminate_process(process_box[0])
+                raise
+
+        task = asyncio.create_task(wait_result())
+        return Worker(runtime=self, task=task, execution_future=execution_future)
+
+    def start_worker_process(
+        self,
+        parameters: RuntimeParameters,
+        *,
+        timeout: float | None = None,
+        after_start: RuntimeStartCallback | None = None,
+    ) -> tuple[Connection, SpawnProcess, object | None]:
+        parent_connection, child_connection = self.create_worker_pipe()
+        process = self.create_worker_process(
+            parameters,
+            child_connection,
+            timeout=timeout,
+        )
+        execution = self.before_worker_start(parameters)
         try:
-            process = self.create_worker_process(
-                parameters,
-                child_connection,
-                timeout=timeout,
-            )
-            self.before_worker_start(parameters)
             with self.suppress_main_module_fixup():
                 process.start()
             child_connection.close()
+            if after_start is not None:
+                after_start(process, execution)
+            return parent_connection, process, execution
+        except BaseException:
+            parent_connection.close()
+            child_connection.close()
+            self.terminate_process(process)
+            self.after_worker_finish(parameters, execution=execution)
+            raise
 
+    async def finish_worker_process(
+        self,
+        connection: Connection,
+        parameters: RuntimeParameters,
+        process: SpawnProcess,
+        execution: object | None,
+        *,
+        timeout: float | None,
+    ) -> RuntimeResult:
+        try:
+            return await asyncio.to_thread(
+                self.finish_worker_process_sync,
+                connection,
+                parameters,
+                process,
+                execution,
+                timeout=timeout,
+            )
+        except asyncio.CancelledError:
+            self.terminate_process(process)
+            raise
+
+    def finish_worker_process_sync(
+        self,
+        connection: Connection,
+        parameters: RuntimeParameters,
+        process: SpawnProcess,
+        execution: object | None,
+        *,
+        timeout: float | None,
+    ) -> RuntimeResult:
+        try:
             try:
                 response = self.recv_worker_response(
-                    parent_connection,
+                    connection,
                     parameters,
                     process,
                     timeout=timeout,
                 )
             finally:
-                parent_connection.close()
+                connection.close()
 
             process.join(timeout=1)
             if process.is_alive():
@@ -360,15 +482,17 @@ class Runtime(abc.ABC):
 
             return response
         finally:
-            self.after_worker_finish(parameters)
+            self.after_worker_finish(parameters, execution=execution)
 
-    async def execute_async(
-        self,
-        program: str | bytes,
-        *,
-        timeout: float | None = None,
-    ) -> RuntimeResult:
-        return await asyncio.to_thread(self.execute, program, timeout=timeout)
+    def terminate_process(self, process: SpawnProcess) -> None:
+        if process.exitcode is not None:
+            return
+
+        process.terminate()
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join()
 
     def create_worker_pipe(self) -> tuple[Connection, Connection]:
         return self.multiprocessing_context().Pipe(duplex=False)
@@ -430,10 +554,15 @@ class Runtime(abc.ABC):
     def suppress_main_module_fixup(self) -> MainModuleFixupSuppressed:
         return MainModuleFixupSuppressed()
 
-    def before_worker_start(self, parameters: RuntimeParameters) -> None:
-        return
+    def before_worker_start(self, parameters: RuntimeParameters) -> object | None:
+        return None
 
-    def after_worker_finish(self, parameters: RuntimeParameters) -> None:
+    def after_worker_finish(
+        self,
+        parameters: RuntimeParameters,
+        *,
+        execution: object | None = None,
+    ) -> None:
         return
 
     def check_worker_process(
@@ -694,6 +823,23 @@ class Runtime(abc.ABC):
             elapsed=0,
             exit_code=exit_code,
         )
+
+
+@dataclass
+class Worker:
+    runtime: Runtime
+    task: asyncio.Task[RuntimeResult]
+    execution_future: asyncio.Future[object | None]
+
+    def terminate(self) -> None:
+        self.task.cancel()
+
+    async def close(self) -> None:
+        self.terminate()
+        try:
+            await self.task
+        except (asyncio.CancelledError, EOFError, RuntimeError):
+            return
 
 
 def freeze_output_events(
