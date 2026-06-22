@@ -389,7 +389,7 @@ class PythonRuntime(Runtime):
             raise RuntimeExecutionError("Python spin mode requires api=True")
 
         source = program.encode("utf-8") if isinstance(program, str) else program
-        return source + b"\nspin()\n"
+        return source + b"\n__import__('api').spin()\n"
 
     def worker_execution_for(self, parameters: RuntimeParameters) -> object | None:
         return self.rpc_execution_for(parameters)
