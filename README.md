@@ -2,7 +2,7 @@
 
 A small Wasmtime-backed Python sandbox. It runs WASI CPython in an isolated worker process, captures stdout/stderr, and exposes a synchronous two-way RPC bridge.
 
-## Quick Demo
+## Interactive Demo
 
 ```sh
 uv run demo.py
