@@ -1,4 +1,6 @@
 from .sandbox import (
+    Output,
+    OutputEvent,
     PythonRuntime,
     Runtime,
     RuntimeExecutionError,
@@ -13,6 +15,8 @@ from .sandbox import (
 
 
 __all__ = [
+    "Output",
+    "OutputEvent",
     "PythonRuntime",
     "Runtime",
     "RuntimeExecutionError",

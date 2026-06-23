@@ -2,6 +2,7 @@ from .assets import Asset, AssetDigestError, AssetError, AssetNotFoundError
 from .python import PythonRuntime
 from .rpc_host import RpcHandler, RpcHost
 from .runtime import (
+    Output,
     OutputEvent,
     Runtime,
     RuntimeError,
@@ -22,6 +23,7 @@ __all__ = [
     "AssetError",
     "AssetNotFoundError",
     "OutputEvent",
+    "Output",
     "PythonRuntime",
     "RpcHandler",
     "RpcHost",

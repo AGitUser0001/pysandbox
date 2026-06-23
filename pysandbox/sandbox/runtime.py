@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import traceback
+from collections import UserList
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ import wasmtime
 
 
 __all__ = [
+    "Output",
     "OutputEvent",
     "Runtime",
     "RuntimeError",
@@ -114,16 +116,69 @@ class OutputEvent:
     data: bytes
 
 
-@dataclass(slots=True)
-class OutputChunk:
-    source: str
-    data: bytes | bytearray
+class Output(UserList[OutputEvent]):
+    @property
+    def stdout(self) -> bytes:
+        return b"".join(
+            event.data for event in self.data if event.source == "stdout"
+        )
+
+    @property
+    def stderr(self) -> bytes:
+        return b"".join(
+            event.data for event in self.data if event.source == "stderr"
+        )
+
+    @property
+    def text(self) -> str:
+        return b"".join(event.data for event in self.data).decode(
+            "utf-8",
+            errors="replace",
+        )
+
+    def formatted_text(
+        self,
+        *,
+        stdout: tuple[bytes | None, bytes | None] = (None, None),
+        stderr: tuple[bytes | None, bytes | None] = (None, None),
+    ) -> str:
+        data = bytearray()
+        current_source: str | None = None
+        affixes = {
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
+        for event in self.data:
+            if event.source != current_source:
+                if current_source is not None:
+                    previous_after = affixes[current_source][1]
+                    if previous_after is not None:
+                        data.extend(previous_after)
+
+                current_before = affixes[event.source][0]
+                if current_before is not None:
+                    data.extend(current_before)
+
+                current_source = event.source
+
+            data.extend(event.data)
+
+        if current_source is not None:
+            final_after = affixes[current_source][1]
+            if final_after is not None:
+                data.extend(final_after)
+
+        return bytes(data).decode("utf-8", errors="replace")
+
+
+OUTPUT_SEPARATOR = b"\0"
 
 
 @dataclass
-class OutputBuffer:
+class OutputWriter:
     max_bytes: int
-    events: list[OutputEvent | OutputChunk] = field(default_factory=list)
+    connection: Connection
     size: int = 0
 
     def write_stdout(self, data: bytes) -> int:
@@ -142,24 +197,7 @@ class OutputBuffer:
         if source not in {"stdout", "stderr"}:
             raise ValueError(f"unknown output source: {source}")
 
-        if self.events and self.events[-1].source == source:
-            previous = self.events[-1]
-            if isinstance(previous.data, bytearray):
-                previous.data.extend(data)
-            else:
-                self.events[-1] = OutputChunk(
-                    source=previous.source,
-                    data=bytearray(previous.data + data),
-                )
-        else:
-            if self.events and isinstance(self.events[-1], OutputChunk):
-                previous = self.events[-1]
-                self.events[-1] = OutputEvent(
-                    source=previous.source,
-                    data=bytes(previous.data),
-                )
-
-            self.events.append(OutputChunk(source=source, data=bytearray(data)))
+        self.connection.send_bytes(encode_output_event(OutputEvent(source, data)))
 
         return len(data)
 
@@ -198,7 +236,7 @@ class WasmtimeEnvironment:
     wasi_config: wasmtime.WasiConfig
     module: wasmtime.Module
     instance: wasmtime.Instance
-    output: OutputBuffer
+    output: OutputWriter
     stdin_writer: threading.Thread
     epoch_timer: EpochTimer | None
 
@@ -227,30 +265,23 @@ class MainModuleFixupSuppressed:
             _suppress_main_module_fixup.reset(self.token)
 
 
-@dataclass(frozen=True)
+@dataclass
 class RuntimeResult:
-    output: tuple[OutputEvent, ...]
-    elapsed: float
+    output: Output = field(default_factory=Output)
+    elapsed: float = 0
     exit_code: int | None = None
 
     @property
     def stdout(self) -> bytes:
-        return b"".join(
-            event.data for event in self.output if event.source == "stdout"
-        )
+        return self.output.stdout
 
     @property
     def stderr(self) -> bytes:
-        return b"".join(
-            event.data for event in self.output if event.source == "stderr"
-        )
+        return self.output.stderr
 
     @property
     def text(self) -> str:
-        return b"".join(event.data for event in self.output).decode(
-            "utf-8",
-            errors="replace",
-        )
+        return self.output.text
 
     def formatted_text(
         self,
@@ -258,57 +289,7 @@ class RuntimeResult:
         stdout: tuple[bytes | None, bytes | None] = (None, None),
         stderr: tuple[bytes | None, bytes | None] = (None, None),
     ) -> str:
-        data = bytearray()
-        current_source: str | None = None
-
-        for event in self.output:
-            if event.source != current_source:
-                if current_source is not None:
-                    previous_after = self.output_affixes(
-                        current_source,
-                        stdout=stdout,
-                        stderr=stderr,
-                    )[1]
-                    if previous_after is not None:
-                        data.extend(previous_after)
-
-                current_before = self.output_affixes(
-                    event.source,
-                    stdout=stdout,
-                    stderr=stderr,
-                )[0]
-                if current_before is not None:
-                    data.extend(current_before)
-
-                current_source = event.source
-
-            data.extend(event.data)
-
-        if current_source is not None:
-            final_after = self.output_affixes(
-                current_source,
-                stdout=stdout,
-                stderr=stderr,
-            )[1]
-            if final_after is not None:
-                data.extend(final_after)
-
-        return bytes(data).decode("utf-8", errors="replace")
-
-    @staticmethod
-    def output_affixes(
-        source: str,
-        *,
-        stdout: tuple[bytes | None, bytes | None],
-        stderr: tuple[bytes | None, bytes | None],
-    ) -> tuple[bytes | None, bytes | None]:
-        if source == "stdout":
-            return stdout
-
-        if source == "stderr":
-            return stderr
-
-        raise ValueError(f"unknown output source: {source}")
+        return self.output.formatted_text(stdout=stdout, stderr=stderr)
 
 
 class Runtime(abc.ABC):
@@ -333,21 +314,51 @@ class Runtime(abc.ABC):
         *,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
+        result: RuntimeResult | None = None,
     ) -> RuntimeResult:
+        if result is None:
+            result = RuntimeResult()
+
         parameters = self.generate_runtime_parameters(program)
-        parent_connection, process, execution = self.start_worker_process(
+        (
+            parent_connection,
+            parent_output_connection,
+            process,
+            execution,
+        ) = self.start_worker_process(
             parameters,
             timeout=timeout,
             after_start=after_start,
         )
+        try:
+            try:
+                response = self.recv_worker_response(
+                    parent_connection,
+                    parent_output_connection,
+                    parameters,
+                    process,
+                    result,
+                    timeout=timeout,
+                )
+            finally:
+                parent_connection.close()
+                parent_output_connection.close()
 
-        return self.finish_worker_process_sync(
-            parent_connection,
-            parameters,
-            process,
-            execution,
-            timeout=timeout,
-        )
+            process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+                process.join()
+
+            if isinstance(response, WorkerFailure):
+                raise RuntimeExecutionError(
+                    f"{response.error_type}: {response.message}\n{response.traceback}"
+                )
+
+            result.elapsed = response.elapsed
+            result.exit_code = response.exit_code
+            return result
+        finally:
+            self.after_worker_finish(parameters, execution=execution)
 
     def run(
         self,
@@ -358,7 +369,9 @@ class Runtime(abc.ABC):
     ) -> "Worker":
         loop = asyncio.get_running_loop()
         execution_future: asyncio.Future[object | None] = loop.create_future()
+        result = RuntimeResult()
         process_box: list[SpawnProcess] = []
+        cancel_requested = threading.Event()
 
         def set_execution_result(value: object | None) -> None:
             if not execution_future.done():
@@ -376,6 +389,9 @@ class Runtime(abc.ABC):
             if after_start is not None:
                 after_start(process, execution)
 
+            if cancel_requested.is_set():
+                self.terminate_process(process)
+
             loop.call_soon_threadsafe(set_execution_result, execution)
 
         def execute_in_thread() -> RuntimeResult:
@@ -384,6 +400,7 @@ class Runtime(abc.ABC):
                     program,
                     timeout=timeout,
                     after_start=capture_start,
+                    result=result,
                 )
             except BaseException as exc:
                 loop.call_soon_threadsafe(set_execution_exception, exc)
@@ -393,12 +410,18 @@ class Runtime(abc.ABC):
             try:
                 return await asyncio.to_thread(execute_in_thread)
             except asyncio.CancelledError:
+                cancel_requested.set()
                 if process_box:
                     self.terminate_process(process_box[0])
                 raise
 
         task = asyncio.create_task(wait_result())
-        return Worker(runtime=self, task=task, execution_future=execution_future)
+        return Worker(
+            runtime=self,
+            task=task,
+            execution_future=execution_future,
+            result=result,
+        )
 
     def start_worker_process(
         self,
@@ -406,11 +429,13 @@ class Runtime(abc.ABC):
         *,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
-    ) -> tuple[Connection, SpawnProcess, object | None]:
+    ) -> tuple[Connection, Connection, SpawnProcess, object | None]:
         parent_connection, child_connection = self.create_worker_pipe()
+        parent_output_connection, child_output_connection = self.create_worker_pipe()
         process = self.create_worker_process(
             parameters,
             child_connection,
+            child_output_connection,
             timeout=timeout,
         )
         execution = self.before_worker_start(parameters)
@@ -418,71 +443,18 @@ class Runtime(abc.ABC):
             with self.suppress_main_module_fixup():
                 process.start()
             child_connection.close()
+            child_output_connection.close()
             if after_start is not None:
                 after_start(process, execution)
-            return parent_connection, process, execution
+            return parent_connection, parent_output_connection, process, execution
         except BaseException:
             parent_connection.close()
+            parent_output_connection.close()
             child_connection.close()
+            child_output_connection.close()
             self.terminate_process(process)
             self.after_worker_finish(parameters, execution=execution)
             raise
-
-    async def finish_worker_process(
-        self,
-        connection: Connection,
-        parameters: RuntimeParameters,
-        process: SpawnProcess,
-        execution: object | None,
-        *,
-        timeout: float | None,
-    ) -> RuntimeResult:
-        try:
-            return await asyncio.to_thread(
-                self.finish_worker_process_sync,
-                connection,
-                parameters,
-                process,
-                execution,
-                timeout=timeout,
-            )
-        except asyncio.CancelledError:
-            self.terminate_process(process)
-            raise
-
-    def finish_worker_process_sync(
-        self,
-        connection: Connection,
-        parameters: RuntimeParameters,
-        process: SpawnProcess,
-        execution: object | None,
-        *,
-        timeout: float | None,
-    ) -> RuntimeResult:
-        try:
-            try:
-                response = self.recv_worker_response(
-                    connection,
-                    parameters,
-                    process,
-                    timeout=timeout,
-                )
-            finally:
-                connection.close()
-
-            process.join(timeout=1)
-            if process.is_alive():
-                process.kill()
-                process.join()
-
-            if isinstance(response, WorkerFailure):
-                raise RuntimeExecutionError(
-                    f"{response.error_type}: {response.message}\n{response.traceback}"
-                )
-
-            return response
-        finally:
-            self.after_worker_finish(parameters, execution=execution)
 
     def terminate_process(self, process: SpawnProcess) -> None:
         if process.exitcode is not None:
@@ -501,30 +473,47 @@ class Runtime(abc.ABC):
         self,
         parameters: RuntimeParameters,
         connection: Connection,
+        output_connection: Connection,
         *,
         timeout: float | None,
     ) -> SpawnProcess:
         return self.multiprocessing_context().Process(
             target=runtime_worker_entrypoint,
-            args=(self, parameters, connection, timeout),
+            args=(self, parameters, connection, output_connection, timeout),
             name=f"{self.name}-runtime-worker",
         )
 
     def recv_worker_response(
         self,
         connection: Connection,
+        output_connection: Connection,
         parameters: RuntimeParameters,
         process: SpawnProcess,
+        result: RuntimeResult,
         *,
         timeout: float | None,
     ) -> RuntimeResult | WorkerFailure:
+        def drain_output() -> None:
+            while output_connection.poll():
+                try:
+                    packet = output_connection.recv_bytes()
+                except EOFError:
+                    return
+
+                event = decode_output_event(packet)
+                result.output.append(event)
+
         if timeout is None:
             while True:
                 self.check_worker_process(parameters, process)
+                drain_output()
                 if connection.poll(0.1):
-                    return connection.recv()
+                    response = connection.recv()
+                    drain_output()
+                    return response
 
                 if process.exitcode is not None:
+                    drain_output()
                     raise RuntimeExecutionError(
                         f"runtime worker exited without a response (exit code {process.exitcode})"
                     )
@@ -532,10 +521,14 @@ class Runtime(abc.ABC):
         deadline = time.monotonic() + timeout + 1
         while time.monotonic() < deadline:
             self.check_worker_process(parameters, process)
+            drain_output()
             if connection.poll(0.1):
-                return connection.recv()
+                response = connection.recv()
+                drain_output()
+                return response
 
             if process.exitcode is not None:
+                drain_output()
                 raise RuntimeExecutionError(
                     f"runtime worker exited without a response (exit code {process.exitcode})"
                 )
@@ -575,6 +568,7 @@ class Runtime(abc.ABC):
     def execute_in_worker(
         self,
         parameters: RuntimeParameters,
+        output_connection: Connection,
         *,
         timeout: float | None = None,
     ) -> RuntimeResult:
@@ -586,12 +580,12 @@ class Runtime(abc.ABC):
         try:
             environment = self.setup_wasmtime(
                 parameters,
+                output_connection,
                 timeout=timeout,
             )
             self.before_execution(environment, parameters)
             result = self.run_entrypoint(environment)
             return RuntimeResult(
-                output=result.output,
                 elapsed=time.monotonic() - started_at,
                 exit_code=result.exit_code,
             )
@@ -608,6 +602,7 @@ class Runtime(abc.ABC):
     def setup_wasmtime(
         self,
         parameters: RuntimeParameters,
+        output_connection: Connection,
         *,
         timeout: float | None = None,
     ) -> WasmtimeEnvironment:
@@ -623,7 +618,10 @@ class Runtime(abc.ABC):
         )
 
         linker = wasmtime.Linker(engine)
-        output = OutputBuffer(max_bytes=self.limits.max_output_bytes)
+        output = OutputWriter(
+            max_bytes=self.limits.max_output_bytes,
+            connection=output_connection,
+        )
         stdin_writer = self.configure_worker_stdin(parameters.stdin)
         wasi_config = wasmtime.WasiConfig()
 
@@ -746,7 +744,7 @@ class Runtime(abc.ABC):
         wasi_config: wasmtime.WasiConfig,
         parameters: RuntimeParameters,
         *,
-        output: OutputBuffer,
+        output: OutputWriter,
     ) -> None:
         wasi_config.inherit_stdin()
         wasi_config.stdout_custom = output.write_stdout
@@ -819,7 +817,6 @@ class Runtime(abc.ABC):
             exit_code = exit_code_from_exit_trap(exc)
 
         return RuntimeResult(
-            output=freeze_output_events(environment.output.events),
             elapsed=0,
             exit_code=exit_code,
         )
@@ -830,6 +827,7 @@ class Worker:
     runtime: Runtime
     task: asyncio.Task[RuntimeResult]
     execution_future: asyncio.Future[object | None]
+    result: RuntimeResult
 
     def terminate(self) -> None:
         self.task.cancel()
@@ -842,12 +840,23 @@ class Worker:
             return
 
 
-def freeze_output_events(
-    events: Sequence[OutputEvent | OutputChunk],
-) -> tuple[OutputEvent, ...]:
-    return tuple(
-        OutputEvent(source=event.source, data=bytes(event.data))
-        for event in events
+def encode_output_event(event: OutputEvent) -> bytes:
+    source = event.source.encode("utf-8")
+    if OUTPUT_SEPARATOR in source:
+        raise RuntimeOutputLimitError("output source label contains null byte")
+
+    return source + OUTPUT_SEPARATOR + event.data
+
+
+def decode_output_event(packet: bytes) -> OutputEvent:
+    try:
+        source, data = packet.split(OUTPUT_SEPARATOR, 1)
+    except ValueError:
+        raise RuntimeOutputLimitError("output frame has no source separator")
+
+    return OutputEvent(
+        source=source.decode("utf-8"),
+        data=data,
     )
 
 
@@ -877,10 +886,17 @@ def runtime_worker_entrypoint(
     runtime: Runtime,
     parameters: RuntimeParameters,
     connection: Connection,
+    output_connection: Connection,
     timeout: float | None,
 ) -> None:
     try:
-        connection.send(runtime.execute_in_worker(parameters, timeout=timeout))
+        connection.send(
+            runtime.execute_in_worker(
+                parameters,
+                output_connection,
+                timeout=timeout,
+            )
+        )
     except BaseException as exc:
         connection.send(
             WorkerFailure(
@@ -891,6 +907,7 @@ def runtime_worker_entrypoint(
         )
     finally:
         connection.close()
+        output_connection.close()
 
 
 def write_worker_stdin(write_fd: int, stdin: bytes) -> None:

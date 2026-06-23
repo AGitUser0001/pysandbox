@@ -14,6 +14,7 @@ from ..messaging import Messenger
 from .assets import Asset
 from .rpc_host import RpcHost
 from .runtime import (
+    decode_output_event,
     Runtime,
     RuntimeError,
     RuntimeExecutionError,
@@ -357,12 +358,14 @@ class PythonRuntime(Runtime):
         *,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
+        result: RuntimeResult | None = None,
         spin: bool = False,
     ) -> RuntimeResult:
         return super().execute(
             self.spin_program(program) if spin else program,
             timeout=timeout,
             after_start=after_start,
+            result=result,
         )
 
     def run(
@@ -382,6 +385,7 @@ class PythonRuntime(Runtime):
             runtime=worker.runtime,
             task=worker.task,
             execution_future=worker.execution_future,
+            result=worker.result,
         )
 
     def spin_program(self, program: str | bytes) -> bytes:
@@ -679,22 +683,34 @@ class PythonRuntime(Runtime):
             "    py_compile.compile(path, doraise=True)\n"
             f"pathlib.Path({marker_path!r}).write_text('ok\\n', encoding='utf-8')\n"
         )
-        result = self.execute_in_worker(
-            RuntimeParameters(
-                wasm_path=install.python_wasm,
-                argv=("python.wasm", "-I"),
-                stdin=script.encode("utf-8"),
-                mounts=[
-                    RuntimeMount(
-                        host=install.runtime_root,
-                        guest="/",
-                        readonly=False,
-                        file_readonly=False,
-                    ),
-                ],
-            ),
-            timeout=30,
-        )
+        parent_output_connection, child_output_connection = self.create_worker_pipe()
+        try:
+            result = self.execute_in_worker(
+                RuntimeParameters(
+                    wasm_path=install.python_wasm,
+                    argv=("python.wasm", "-I"),
+                    stdin=script.encode("utf-8"),
+                    mounts=[
+                        RuntimeMount(
+                            host=install.runtime_root,
+                            guest="/",
+                            readonly=False,
+                            file_readonly=False,
+                        ),
+                    ],
+                ),
+                child_output_connection,
+                timeout=30,
+            )
+        finally:
+            child_output_connection.close()
+
+        while parent_output_connection.poll():
+            result.output.append(
+                decode_output_event(parent_output_connection.recv_bytes())
+            )
+        parent_output_connection.close()
+
         if result.exit_code != 0:
             raise RuntimeSetupError(
                 "failed to compile guest Python files\n"
