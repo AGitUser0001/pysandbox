@@ -131,17 +131,21 @@ class Output(UserList[OutputEvent]):
 
     @property
     def text(self) -> str:
-        return b"".join(event.data for event in self.data).decode(
+        return self.bytes.decode(
             "utf-8",
             errors="replace",
         )
 
-    def formatted_text(
+    @property
+    def bytes(self) -> bytes:
+        return b"".join(event.data for event in self.data)
+
+    def formatted(
         self,
         *,
         stdout: tuple[bytes | None, bytes | None] = (None, None),
         stderr: tuple[bytes | None, bytes | None] = (None, None),
-    ) -> str:
+    ) -> bytes:
         data = bytearray()
         current_source: str | None = None
         affixes = {
@@ -169,7 +173,15 @@ class Output(UserList[OutputEvent]):
             if final_after is not None:
                 data.extend(final_after)
 
-        return bytes(data).decode("utf-8", errors="replace")
+        return bytes(data)
+    
+    def formatted_text(
+        self,
+        *,
+        stdout: tuple[bytes | None, bytes | None] = (None, None),
+        stderr: tuple[bytes | None, bytes | None] = (None, None),
+    ) -> str:
+        return self.formatted(stdout=stdout, stderr=stderr).decode("utf-8", errors="replace")
 
 
 OUTPUT_SEPARATOR = b"\0"
