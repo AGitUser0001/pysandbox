@@ -705,11 +705,16 @@ class PythonRuntime(Runtime):
         finally:
             child_output_connection.close()
 
-        while parent_output_connection.poll():
-            result.output.append(
-                decode_output_event(parent_output_connection.recv_bytes())
-            )
-        parent_output_connection.close()
+        try:
+            while parent_output_connection.poll():
+                try:
+                    packet = parent_output_connection.recv_bytes()
+                except EOFError:
+                    break
+
+                result.output.append(decode_output_event(packet))
+        finally:
+            parent_output_connection.close()
 
         if result.exit_code != 0:
             raise RuntimeSetupError(
