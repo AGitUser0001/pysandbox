@@ -12,6 +12,7 @@ __all__ = [
 
 DATA_FRAME = b"D"
 SWITCH_FRAME = b"S"
+TRUNCATE_FRAME = b"T"
 FRAME_HEADER_SIZE = 9
 FRAME_HEADER_FORMAT = ">Q"
 DEFAULT_ROTATE_AFTER_BYTES = 1024 * 1024
@@ -86,8 +87,14 @@ class FileTransport:
             if frame_type == SWITCH_FRAME:
                 previous_index = self.read_index
                 self.read_index = 1 - self.read_index
-                self.truncate_read_file(previous_index)
+                if not self.truncate_read_file(previous_index):
+                    self.request_remote_truncate(previous_index)
+
                 self.offsets[previous_index] = 0
+                continue
+
+            if frame_type == TRUNCATE_FRAME:
+                self.truncate_requested_write_file(payload)
                 continue
 
     def read_next_frame(self) -> tuple[bytes, bytes] | None:
@@ -165,10 +172,33 @@ class FileTransport:
         with path.open("r+b") as stream:
             stream.truncate(0)
 
-    def truncate_read_file(self, index: int) -> None:
-        path = Path(self.read_paths[index])
+    def request_remote_truncate(self, index: int) -> None:
+        self.append_frame(TRUNCATE_FRAME, bytes((index,)))
+
+    def truncate_requested_write_file(self, payload: bytes) -> None:
+        if len(payload) != 1:
+            return
+
+        index = payload[0]
+        if index not in {0, 1}:
+            return
+
+        path = Path(self.write_paths[index])
         self.truncate_file(path)
+
+        stream = self._write_streams[index]
+        if stream is not None:
+            stream.seek(0)
+
+    def truncate_read_file(self, index: int) -> bool:
+        path = Path(self.read_paths[index])
+        try:
+            self.truncate_file(path)
+        except PermissionError:
+            return False
 
         stream = self._read_streams[index]
         if stream is not None:
             stream.seek(0)
+
+        return True
