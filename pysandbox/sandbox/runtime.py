@@ -392,6 +392,7 @@ class Runtime(abc.ABC):
         def set_execution_exception(exc: BaseException) -> None:
             if not execution_future.done():
                 execution_future.set_exception(exc)
+                execution_future.exception()
 
         def capture_start(
             process: SpawnProcess,
