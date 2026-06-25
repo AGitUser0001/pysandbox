@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox"
-version = "0.2.4"
+version = "0.3"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 requires-python = ">=3.12"
