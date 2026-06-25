@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing.context import SpawnProcess
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ from .runtime import (
     RuntimeParameters,
     RuntimeResult,
     RuntimeStartCallback,
+    RuntimeWorkerStartCallback,
     RuntimeSetupError,
     WasmtimeEnvironment,
     Worker,
@@ -157,6 +158,8 @@ class PythonRpcExecution:
     stop: threading.Event
     violation: threading.Event
     messenger_ready: threading.Condition
+    limits: RuntimeLimits
+    limits_lock: threading.RLock = field(default_factory=threading.RLock)
     messenger: Messenger | None = None
 
     def set_messenger(self, messenger: Messenger) -> None:
@@ -173,6 +176,14 @@ class PythonRpcExecution:
                 raise TimeoutError("worker messenger was not ready")
 
             return self.messenger
+
+    def update_limits(self, limits: RuntimeLimits) -> None:
+        with self.limits_lock:
+            self.limits = limits
+
+    def max_request_bytes(self) -> int:
+        with self.limits_lock:
+            return self.limits.max_rpc_message_bytes
 
 
 @dataclass
@@ -237,10 +248,9 @@ class PythonRuntime(Runtime):
         *,
         root: Path = PACKAGE_ROOT.parent / "python-wasi",
         python_version: str | None = None,
-        limits: RuntimeLimits | None = None,
         api: bool = True,
     ) -> None:
-        super().__init__(limits=limits)
+        super().__init__()
         self.root = root
         self.python_version = python_version
         self.api = api
@@ -271,9 +281,13 @@ class PythonRuntime(Runtime):
     def runtime_root(self) -> Path:
         return self.root / "runtime"
 
-    def generate_runtime_parameters(self, program: str | bytes) -> RuntimeParameters:
+    def generate_runtime_parameters(
+        self,
+        program: str | bytes,
+        limits: RuntimeLimits,
+    ) -> RuntimeParameters:
         install = self.ensure_runtime()
-        stdin = self.prepare_program(program)
+        stdin = self.prepare_program(program, limits)
         message_pipe = PythonMessagePipe.create() if self.api else None
         env: dict[str, str] = {}
         mounts = [
@@ -318,6 +332,7 @@ class PythonRuntime(Runtime):
 
         return PythonRuntimeParameters(
             wasm_path=install.python_wasm,
+            limits=limits,
             argv=("python.wasm", "-I"),
             env=env,
             stdin=stdin,
@@ -325,20 +340,20 @@ class PythonRuntime(Runtime):
             message_pipe=message_pipe,
         )
 
-    def prepare_program(self, program: str | bytes) -> bytes:
+    def prepare_program(self, program: str | bytes, limits: RuntimeLimits) -> bytes:
         source = program.encode("utf-8") if isinstance(program, str) else program
         prefix: list[bytes] = []
 
-        if self.limits.replenish_fuel_interval is not None:
+        if limits.replenish_fuel_interval is not None:
             prefix.append(
                 (
                     "import os, sys, time\n"
                     "def __pysandbox_meter(_, __, ___, *, os=os, time=time, "
-                    f"state=[time.monotonic() + {self.limits.replenish_fuel_interval!r}, None]):\n"
+                    f"state=[time.monotonic() + {limits.replenish_fuel_interval!r}, None]):\n"
                     "    now = time.monotonic()\n"
                     "    if now >= state[0]:\n"
                     "        os.sched_yield()\n"
-                    f"        state[0] = now + {self.limits.replenish_fuel_interval!r}\n"
+                    f"        state[0] = now + {limits.replenish_fuel_interval!r}\n"
                     "    return state[1]\n"
                     "__pysandbox_meter.__kwdefaults__['state'][1] = __pysandbox_meter\n"
                     "sys.settrace(__pysandbox_meter)\n"
@@ -356,15 +371,19 @@ class PythonRuntime(Runtime):
         self,
         program: str | bytes,
         *,
+        limits: RuntimeLimits | None = None,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
+        worker_after_start: RuntimeWorkerStartCallback | None = None,
         result: RuntimeResult | None = None,
         spin: bool = False,
     ) -> RuntimeResult:
         return super().execute(
             self.spin_program(program) if spin else program,
+            limits=limits,
             timeout=timeout,
             after_start=after_start,
+            worker_after_start=worker_after_start,
             result=result,
         )
 
@@ -372,12 +391,14 @@ class PythonRuntime(Runtime):
         self,
         program: str | bytes,
         *,
+        limits: RuntimeLimits | None = None,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
         spin: bool = False,
     ) -> PythonWorker:
         worker = super().run(
             self.spin_program(program) if spin else program,
+            limits=limits,
             timeout=timeout,
             after_start=after_start,
         )
@@ -386,6 +407,7 @@ class PythonRuntime(Runtime):
             task=worker.task,
             execution_future=worker.execution_future,
             result=worker.result,
+            control_future=worker.control_future,
         )
 
     def spin_program(self, program: str | bytes) -> bytes:
@@ -435,6 +457,7 @@ class PythonRuntime(Runtime):
             stop=stop,
             violation=violation,
             messenger_ready=threading.Condition(threading.RLock()),
+            limits=parameters.limits,
         )
         thread = threading.Thread(
             target=self.rpc.dispatch_file_forever,
@@ -444,7 +467,7 @@ class PythonRuntime(Runtime):
                 stop,
             ),
             kwargs={
-                "max_request_bytes": self.limits.max_rpc_message_bytes,
+                "max_request_bytes": execution.max_request_bytes,
                 "on_oversized_request": violation.set,
                 "on_messenger_ready": execution.set_messenger,
             },
@@ -681,6 +704,7 @@ class PythonRuntime(Runtime):
             f"pathlib.Path({marker_path!r}).write_text('ok\\n', encoding='utf-8')\n"
         )
         parent_output_connection, child_output_connection = self.create_worker_pipe()
+        child_control_connection, parent_control_connection = self.create_worker_pipe()
         try:
             result = self.execute_in_worker(
                 RuntimeParameters(
@@ -697,10 +721,13 @@ class PythonRuntime(Runtime):
                     ],
                 ),
                 child_output_connection,
+                child_control_connection,
                 timeout=30,
             )
         finally:
             child_output_connection.close()
+            child_control_connection.close()
+            parent_control_connection.close()
 
         try:
             while parent_output_connection.poll():

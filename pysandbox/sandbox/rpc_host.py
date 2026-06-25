@@ -101,7 +101,7 @@ class RpcHost:
         response_files: tuple[Path, Path],
         stop: threading.Event,
         *,
-        max_request_bytes: int,
+        max_request_bytes: int | Callable[[], int],
         on_oversized_request: Callable[[], None],
         on_messenger_ready: Callable[[Messenger], None] | None = None,
         poll_interval: float = 0.001,
@@ -124,7 +124,12 @@ class RpcHost:
                     waiter.wait(stop)
                     continue
 
-                if unread_size > max_request_bytes:
+                request_limit = (
+                    max_request_bytes()
+                    if callable(max_request_bytes)
+                    else max_request_bytes
+                )
+                if unread_size > request_limit:
                     on_oversized_request()
                     return
 

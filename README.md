@@ -13,18 +13,20 @@ uv run demo.py
 ```python
 from pysandbox import PythonRuntime, RuntimeLimits
 
-runtime = PythonRuntime(
-    limits=RuntimeLimits(
-        fuel=10_000_000_000,
-        replenish_fuel_interval=30,
-    )
-)
+runtime = PythonRuntime()
 
 @runtime.rpc.expose
 def add(a: int, b: int) -> int:
     return int(a) + int(b)
 
-result = runtime.execute("print('2 + 5 =', add(2, 5))", timeout=30)
+result = runtime.execute(
+    "print('2 + 5 =', add(2, 5))",
+    limits=RuntimeLimits(
+        fuel=10_000_000_000,
+        replenish_fuel_interval=30,
+    ),
+    timeout=30,
+)
 
 print(result.exit_code)
 print(result.text)

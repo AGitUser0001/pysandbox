@@ -27,6 +27,7 @@ __all__ = [
     "RuntimeError",
     "RuntimeExecutionError",
     "RuntimeLimits",
+    "RuntimeLimitState",
     "RuntimeMount",
     "RuntimeOutputLimitError",
     "RuntimeParameters",
@@ -101,6 +102,7 @@ class RuntimeLimits:
 @dataclass
 class RuntimeParameters:
     wasm_path: Path
+    limits: RuntimeLimits = field(default_factory=RuntimeLimits)
     argv: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     stdin: bytes = b""
@@ -108,6 +110,12 @@ class RuntimeParameters:
 
 
 RuntimeStartCallback = Callable[[SpawnProcess, object | None], None]
+RuntimeWorkerStartCallback = Callable[[SpawnProcess, object | None, Connection], None]
+
+
+@dataclass
+class RuntimeLimitState:
+    current: RuntimeLimits
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,8 +197,9 @@ OUTPUT_SEPARATOR = b"\0"
 
 @dataclass
 class OutputWriter:
-    max_bytes: int
+    limits: RuntimeLimitState
     connection: Connection
+    control_connection: Connection
     size: int = 0
 
     def write_stdout(self, data: bytes) -> int:
@@ -200,10 +209,12 @@ class OutputWriter:
         return self.write("stderr", data)
 
     def write(self, source: str, data: bytes) -> int:
+        drain_limit_updates(self.limits, self.control_connection)
         self.size += len(data)
-        if self.size > self.max_bytes:
+        max_bytes = self.limits.current.max_output_bytes
+        if self.size > max_bytes:
             raise RuntimeOutputLimitError(
-                f"output exceeded {self.max_bytes} bytes"
+                f"output exceeded {max_bytes} bytes"
             )
 
         if source not in {"stdout", "stderr"}:
@@ -249,6 +260,8 @@ class WasmtimeEnvironment:
     module: wasmtime.Module
     instance: wasmtime.Instance
     output: OutputWriter
+    limits: RuntimeLimitState
+    control_connection: Connection
     stdin_writer: threading.Thread
     epoch_timer: EpochTimer | None
 
@@ -307,8 +320,7 @@ class RuntimeResult:
 class Runtime(abc.ABC):
     """Base class for a Wasmtime-backed guest runtime."""
 
-    def __init__(self, *, limits: RuntimeLimits | None = None) -> None:
-        self.limits = limits or RuntimeLimits()
+    def __init__(self) -> None:
         self._last_fuel_replenish: float | None = None
 
     @property
@@ -317,30 +329,49 @@ class Runtime(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def generate_runtime_parameters(self, program: str | bytes) -> RuntimeParameters:
+    def generate_runtime_parameters(
+        self,
+        program: str | bytes,
+        limits: RuntimeLimits,
+    ) -> RuntimeParameters:
         raise NotImplementedError
 
     def execute(
         self,
         program: str | bytes,
         *,
+        limits: RuntimeLimits | None = None,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
+        worker_after_start: RuntimeWorkerStartCallback | None = None,
         result: RuntimeResult | None = None,
     ) -> RuntimeResult:
         if result is None:
             result = RuntimeResult()
 
-        parameters = self.generate_runtime_parameters(program)
+        execution_limits = limits or RuntimeLimits()
+        parameters = self.generate_runtime_parameters(program, execution_limits)
+
+        def capture_start(
+            process: SpawnProcess,
+            execution: object | None,
+            control_connection: Connection,
+        ) -> None:
+            if after_start is not None:
+                after_start(process, execution)
+            if worker_after_start is not None:
+                worker_after_start(process, execution, control_connection)
+
         (
             parent_connection,
             parent_output_connection,
+            parent_control_connection,
             process,
             execution,
         ) = self.start_worker_process(
             parameters,
             timeout=timeout,
-            after_start=after_start,
+            after_start=capture_start,
         )
         try:
             try:
@@ -355,6 +386,7 @@ class Runtime(abc.ABC):
             finally:
                 parent_connection.close()
                 parent_output_connection.close()
+                parent_control_connection.close()
 
             process.join(timeout=1)
             if process.is_alive():
@@ -376,11 +408,13 @@ class Runtime(abc.ABC):
         self,
         program: str | bytes,
         *,
+        limits: RuntimeLimits | None = None,
         timeout: float | None = None,
         after_start: RuntimeStartCallback | None = None,
     ) -> "Worker":
         loop = asyncio.get_running_loop()
         execution_future: asyncio.Future[object | None] = loop.create_future()
+        control_future: asyncio.Future[Connection] = loop.create_future()
         result = RuntimeResult()
         process_box: list[SpawnProcess] = []
         cancel_requested = threading.Event()
@@ -394,29 +428,41 @@ class Runtime(abc.ABC):
                 execution_future.set_exception(exc)
                 execution_future.exception()
 
+        def set_control_result(value: Connection) -> None:
+            if not control_future.done():
+                control_future.set_result(value)
+
+        def set_control_exception(exc: BaseException) -> None:
+            if not control_future.done():
+                control_future.set_exception(exc)
+                control_future.exception()
+
         def capture_start(
             process: SpawnProcess,
             execution: object | None,
+            control_connection: Connection,
         ) -> None:
             process_box.append(process)
-            if after_start is not None:
-                after_start(process, execution)
 
             if cancel_requested.is_set():
                 self.terminate_process(process)
 
+            loop.call_soon_threadsafe(set_control_result, control_connection)
             loop.call_soon_threadsafe(set_execution_result, execution)
 
         def execute_in_thread() -> RuntimeResult:
             try:
                 return self.execute(
                     program,
+                    limits=limits,
                     timeout=timeout,
-                    after_start=capture_start,
+                    after_start=after_start,
+                    worker_after_start=capture_start,
                     result=result,
                 )
             except BaseException as exc:
                 loop.call_soon_threadsafe(set_execution_exception, exc)
+                loop.call_soon_threadsafe(set_control_exception, exc)
                 raise
 
         async def wait_result() -> RuntimeResult:
@@ -434,6 +480,7 @@ class Runtime(abc.ABC):
             task=task,
             execution_future=execution_future,
             result=result,
+            control_future=control_future,
         )
 
     def start_worker_process(
@@ -441,14 +488,16 @@ class Runtime(abc.ABC):
         parameters: RuntimeParameters,
         *,
         timeout: float | None = None,
-        after_start: RuntimeStartCallback | None = None,
-    ) -> tuple[Connection, Connection, SpawnProcess, object | None]:
+        after_start: RuntimeWorkerStartCallback | None = None,
+    ) -> tuple[Connection, Connection, Connection, SpawnProcess, object | None]:
         parent_connection, child_connection = self.create_worker_pipe()
         parent_output_connection, child_output_connection = self.create_worker_pipe()
+        child_control_connection, parent_control_connection = self.create_worker_pipe()
         process = self.create_worker_process(
             parameters,
             child_connection,
             child_output_connection,
+            child_control_connection,
             timeout=timeout,
         )
         execution = self.before_worker_start(parameters)
@@ -457,14 +506,23 @@ class Runtime(abc.ABC):
                 process.start()
             child_connection.close()
             child_output_connection.close()
+            child_control_connection.close()
             if after_start is not None:
-                after_start(process, execution)
-            return parent_connection, parent_output_connection, process, execution
+                after_start(process, execution, parent_control_connection)
+            return (
+                parent_connection,
+                parent_output_connection,
+                parent_control_connection,
+                process,
+                execution,
+            )
         except BaseException:
             parent_connection.close()
             parent_output_connection.close()
+            parent_control_connection.close()
             child_connection.close()
             child_output_connection.close()
+            child_control_connection.close()
             self.terminate_process(process)
             self.after_worker_finish(parameters, execution=execution)
             raise
@@ -487,12 +545,20 @@ class Runtime(abc.ABC):
         parameters: RuntimeParameters,
         connection: Connection,
         output_connection: Connection,
+        control_connection: Connection,
         *,
         timeout: float | None,
     ) -> SpawnProcess:
         return self.multiprocessing_context().Process(
             target=runtime_worker_entrypoint,
-            args=(self, parameters, connection, output_connection, timeout),
+            args=(
+                self,
+                parameters,
+                connection,
+                output_connection,
+                control_connection,
+                timeout,
+            ),
             name=f"{self.name}-runtime-worker",
         )
 
@@ -582,6 +648,7 @@ class Runtime(abc.ABC):
         self,
         parameters: RuntimeParameters,
         output_connection: Connection,
+        control_connection: Connection,
         *,
         timeout: float | None = None,
     ) -> RuntimeResult:
@@ -594,6 +661,7 @@ class Runtime(abc.ABC):
             environment = self.setup_wasmtime(
                 parameters,
                 output_connection,
+                control_connection,
                 timeout=timeout,
             )
             self.before_execution(environment, parameters)
@@ -616,24 +684,28 @@ class Runtime(abc.ABC):
         self,
         parameters: RuntimeParameters,
         output_connection: Connection,
+        control_connection: Connection,
         *,
         timeout: float | None = None,
     ) -> WasmtimeEnvironment:
+        limits = RuntimeLimitState(parameters.limits)
         config = wasmtime.Config()
-        self.configure_wasmtime(config, timeout=timeout)
+        self.configure_wasmtime(config, limits=limits.current, timeout=timeout)
 
         engine = wasmtime.Engine(config)
         store = wasmtime.Store(engine)
         epoch_timer = self.configure_store(
             store,
+            limits=limits.current,
             engine=engine,
             timeout=timeout,
         )
 
         linker = wasmtime.Linker(engine)
         output = OutputWriter(
-            max_bytes=self.limits.max_output_bytes,
+            limits=limits,
             connection=output_connection,
+            control_connection=control_connection,
         )
         stdin_writer = self.configure_worker_stdin(parameters.stdin)
         wasi_config = wasmtime.WasiConfig()
@@ -644,7 +716,12 @@ class Runtime(abc.ABC):
             output=output,
         )
         store.set_wasi(wasi_config)
-        self.configure_linker(linker, store)
+        self.configure_linker(
+            linker,
+            store,
+            limits=limits,
+            control_connection=control_connection,
+        )
 
         module = wasmtime.Module.from_file(engine, str(parameters.wasm_path))
         instance = linker.instantiate(store, module)
@@ -658,6 +735,8 @@ class Runtime(abc.ABC):
             module=module,
             instance=instance,
             output=output,
+            limits=limits,
+            control_connection=control_connection,
             stdin_writer=stdin_writer,
             epoch_timer=epoch_timer,
         )
@@ -666,89 +745,104 @@ class Runtime(abc.ABC):
         self,
         config: wasmtime.Config,
         *,
+        limits: RuntimeLimits,
         timeout: float | None,
     ) -> None:
-        self.validate_limits()
+        self.validate_limits(limits)
 
-        if self.limits.wasmtime_cache:
+        if limits.wasmtime_cache:
             config.cache = True
 
-        config.max_wasm_stack = self.limits.max_wasm_stack
+        config.max_wasm_stack = limits.max_wasm_stack
 
-        if self.fuel_enabled():
+        if self.fuel_enabled(limits):
             config.consume_fuel = True
 
-        if self.limits.epoch_deadline_ticks is not None or timeout is not None:
+        if limits.epoch_deadline_ticks is not None or timeout is not None:
             config.epoch_interruption = True
 
-    def validate_limits(self) -> None:
-        if self.limits.replenish_fuel_interval is not None:
-            if self.limits.fuel is None:
+    @staticmethod
+    def validate_limits(limits: RuntimeLimits) -> None:
+        if limits.replenish_fuel_interval is not None:
+            if limits.fuel is None:
                 raise ValueError("replenish_fuel_interval requires fuel")
 
-            if self.limits.replenish_fuel_interval <= 0:
+            if limits.replenish_fuel_interval <= 0:
                 raise ValueError("replenish_fuel_interval must be positive")
 
     def configure_store(
         self,
         store: wasmtime.Store,
         *,
+        limits: RuntimeLimits,
         engine: wasmtime.Engine,
         timeout: float | None,
     ) -> EpochTimer | None:
         store.set_limits(
-            memory_size=self.limits.max_memory_size,
+            memory_size=limits.max_memory_size,
             instances=1,
             tables=1,
             memories=1,
         )
 
-        if self.limits.fuel is not None:
-            store.set_fuel(self.limits.fuel)
+        if limits.fuel is not None:
+            store.set_fuel(limits.fuel)
             self._last_fuel_replenish = time.monotonic()
 
         if timeout is not None:
             if timeout <= 0:
                 raise ValueError("timeout must be positive")
 
-            store.set_epoch_deadline(self.limits.epoch_deadline_ticks or 1)
+            store.set_epoch_deadline(limits.epoch_deadline_ticks or 1)
             timer = EpochTimer(engine=engine, timeout=timeout)
             timer.start()
             return timer
 
-        if self.limits.epoch_deadline_ticks is not None:
-            store.set_epoch_deadline(self.limits.epoch_deadline_ticks)
+        if limits.epoch_deadline_ticks is not None:
+            store.set_epoch_deadline(limits.epoch_deadline_ticks)
 
         return None
 
-    def fuel_enabled(self) -> bool:
-        return (
-            self.limits.fuel is not None
-        )
+    def fuel_enabled(self, limits: RuntimeLimits) -> bool:
+        return limits.fuel is not None
 
     def configure_linker(
         self,
         linker: wasmtime.Linker,
         store: wasmtime.Store,
+        *,
+        limits: RuntimeLimitState,
+        control_connection: Connection,
     ) -> None:
-        linker.allow_shadowing = self.limits.replenish_fuel_interval is not None
+        linker.allow_shadowing = limits.current.replenish_fuel_interval is not None
         linker.define_wasi()
 
-        if self.limits.replenish_fuel_interval is not None:
+        if limits.current.replenish_fuel_interval is not None:
             linker.define_func(
                 "wasi_snapshot_preview1",
                 "sched_yield",
                 wasmtime.FuncType([], [wasmtime.ValType.i32()]),
-                lambda: self.sched_yield(store),
+                lambda: self.sched_yield(store, limits, control_connection),
             )
 
-    def sched_yield(self, store: wasmtime.Store) -> int:
-        if self._last_fuel_replenish is None or self.limits.fuel is None or self.limits.replenish_fuel_interval is None:
+    def sched_yield(
+        self,
+        store: wasmtime.Store,
+        limits: RuntimeLimitState,
+        control_connection: Connection,
+    ) -> int:
+        drain_limit_updates(limits, control_connection)
+        current = limits.current
+        if (
+            self._last_fuel_replenish is None
+            or current.fuel is None
+            or current.replenish_fuel_interval is None
+        ):
             return 0
         delta = time.monotonic() - self._last_fuel_replenish
-        if delta < self.limits.replenish_fuel_interval:
+        if delta < current.replenish_fuel_interval:
             return 0
-        store.set_fuel(self.limits.fuel)
+        store.set_fuel(current.fuel)
         self._last_fuel_replenish = time.monotonic()
         return 0
 
@@ -841,6 +935,32 @@ class Worker:
     task: asyncio.Task[RuntimeResult]
     execution_future: asyncio.Future[object | None]
     result: RuntimeResult
+    control_future: asyncio.Future[Connection] | None = None
+
+    def update_limits(self, limits: RuntimeLimits) -> None:
+        control_connection = self.control_connection()
+        if control_connection is None:
+            raise RuntimeExecutionError("worker control connection is not ready")
+
+        control_connection.send(limits)
+        if self.execution_future.done():
+            try:
+                execution = self.execution_future.result()
+            except BaseException:
+                return
+
+            update_limits = getattr(execution, "update_limits", None)
+            if callable(update_limits):
+                update_limits(limits)
+
+    def control_connection(self) -> Connection | None:
+        if self.control_future is None or not self.control_future.done():
+            return None
+
+        try:
+            return self.control_future.result()
+        except BaseException:
+            return None
 
     def terminate(self) -> None:
         self.task.cancel()
@@ -851,6 +971,10 @@ class Worker:
             await self.task
         except (asyncio.CancelledError, EOFError, RuntimeError):
             return
+        finally:
+            control_connection = self.control_connection()
+            if control_connection is not None:
+                control_connection.close()
 
 
 def encode_output_event(event: OutputEvent) -> bytes:
@@ -871,6 +995,19 @@ def decode_output_event(packet: bytes) -> OutputEvent:
         source=source.decode("utf-8"),
         data=data,
     )
+
+
+def drain_limit_updates(
+    limits: RuntimeLimitState,
+    control_connection: Connection,
+) -> None:
+    while control_connection.poll():
+        value = control_connection.recv()
+        if not isinstance(value, RuntimeLimits):
+            continue
+
+        Runtime.validate_limits(value)
+        limits.current = value
 
 
 def exit_code_from_exit_trap(exc: wasmtime.ExitTrap) -> int:
@@ -900,6 +1037,7 @@ def runtime_worker_entrypoint(
     parameters: RuntimeParameters,
     connection: Connection,
     output_connection: Connection,
+    control_connection: Connection,
     timeout: float | None,
 ) -> None:
     try:
@@ -907,6 +1045,7 @@ def runtime_worker_entrypoint(
             runtime.execute_in_worker(
                 parameters,
                 output_connection,
+                control_connection,
                 timeout=timeout,
             )
         )
@@ -921,6 +1060,7 @@ def runtime_worker_entrypoint(
     finally:
         connection.close()
         output_connection.close()
+        control_connection.close()
 
 
 def write_worker_stdin(write_fd: int, stdin: bytes) -> None:

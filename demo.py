@@ -28,6 +28,10 @@ MAGENTA = "\x1b[35m"
 WHITE = "\x1b[37m"
 TYPEWRITER_DELAY = 0.002
 PRESENTATION_PAUSE = 5.0
+DEMO_LIMITS = RuntimeLimits(
+    fuel=10_000_000_000,
+    replenish_fuel_interval=30,
+)
 PRESENTATION_READING_CHARS_PER_SECOND = 42.0
 PRESENTATION_MIN_PAUSE = 0.6
 
@@ -122,12 +126,7 @@ def wait_for_enter(seconds: float) -> bool:
 
 
 def create_runtime() -> PythonRuntime:
-    runtime = PythonRuntime(
-        limits=RuntimeLimits(
-            fuel=10_000_000_000,
-            replenish_fuel_interval=30,
-        )
-    )
+    runtime = PythonRuntime()
 
     @runtime.rpc.expose
     def add(a: int, b: int) -> int:
@@ -145,12 +144,7 @@ def host_setup_example() -> str:
         """
         from pysandbox import PythonRuntime, RuntimeLimits
 
-        runtime = PythonRuntime(
-            limits=RuntimeLimits(
-                fuel=10_000_000_000,
-                replenish_fuel_interval=30,
-            )
-        )
+        runtime = PythonRuntime()
 
         @runtime.rpc.expose
         def add(a: int, b: int) -> int:
@@ -191,7 +185,15 @@ def worker_program() -> str:
 def worker_call_example() -> str:
     return textwrap.dedent(
         """
-        worker = runtime.run(worker_program, spin=True, timeout=30)
+        worker = runtime.run(
+            worker_program,
+            limits=RuntimeLimits(
+                fuel=10_000_000_000,
+                replenish_fuel_interval=30,
+            ),
+            spin=True,
+            timeout=30,
+        )
         try:
             for value in range(3):
                 result = await worker.call(("calculator", "scale"), value + 5, by=3, timeout=5)
@@ -265,7 +267,7 @@ def continue_prompt() -> bool:
 
 
 def execute_code(runtime: PythonRuntime, source: str) -> None:
-    result = runtime.execute(source, timeout=30)
+    result = runtime.execute(source, limits=DEMO_LIMITS, timeout=30)
 
     typewrite(f"exit code: {result.exit_code}")
     typewrite(
@@ -302,6 +304,7 @@ async def worker_demo(runtime: PythonRuntime) -> None:
 
     worker = runtime.run(
         worker_program(),
+        limits=DEMO_LIMITS,
         spin=True,
         timeout=30,
     )
@@ -326,12 +329,7 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
         "create a runtime",
         textwrap.dedent(
             """
-            runtime = PythonRuntime(
-                limits=RuntimeLimits(
-                    fuel=10_000_000_000,
-                    replenish_fuel_interval=30,
-                )
-            )
+            runtime = PythonRuntime()
             """
         ).strip(),
     ),
@@ -354,7 +352,10 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
             result = runtime.execute(\"\"\"
             print("hello from guest")
             print("2 + 5 =", add(a=2, b=5))
-            \"\"\", timeout=30)
+            \"\"\", limits=RuntimeLimits(
+                fuel=10_000_000_000,
+                replenish_fuel_interval=30,
+            ), timeout=30)
             print(result.formatted_text())
             """
         ).strip(),
@@ -365,7 +366,15 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
         textwrap.dedent(
             """
             async def main() -> None:
-                worker = runtime.run("value = 41", spin=True, timeout=30)
+                worker = runtime.run(
+                    "value = 41",
+                    limits=RuntimeLimits(
+                        fuel=10_000_000_000,
+                        replenish_fuel_interval=30,
+                    ),
+                    spin=True,
+                    timeout=30,
+                )
                 try:
                     print(await worker.call(("eval",), "value + 1", timeout=5))
                 finally:
