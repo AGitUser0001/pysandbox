@@ -1,6 +1,6 @@
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, TypeAlias
 
 import cbor2
@@ -56,7 +56,7 @@ class Messenger:
 
         self._handlers: list[MessageHandler] = []
 
-    encoders: dict[type, cbor2.EncoderHook] = {}
+    encoders: dict[type, cbor2.EncoderHook] = field(default_factory=dict)
     def post_message(self, message: Message) -> None:
         payload = cbor2.dumps(message)
         if len(payload) > self.max_message_bytes:
