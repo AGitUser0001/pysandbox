@@ -72,6 +72,7 @@ class Messenger:
     def remove_message_handler(self, handler: MessageHandler) -> None:
         self._handlers.remove(handler)
 
+    tag_hook: cbor2.TagHook | None = None
     def receive_message(self) -> Message:
         header = self._read_exact(HEADER_SIZE)
         (size,) = struct.unpack(HEADER_FORMAT, header)
@@ -81,7 +82,7 @@ class Messenger:
                 f"incoming message exceeds {self.max_message_bytes} bytes"
             )
 
-        return cbor2.loads(self._read_exact(size))
+        return cbor2.loads(self._read_exact(size), tag_hook=self.tag_hook)
 
     def dispatch_next(self) -> Message:
         message = self.receive_message()
