@@ -246,7 +246,7 @@ class PythonRuntime(Runtime):
     def __init__(
         self,
         *,
-        root: Path = PACKAGE_ROOT.parent / "python-wasi",
+        root: Path = PACKAGE_ROOT / "python-wasi",
         python_version: str | None = None,
         api: bool = True,
     ) -> None:
