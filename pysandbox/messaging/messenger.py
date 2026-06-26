@@ -56,6 +56,7 @@ class Messenger:
 
         self._handlers: list[MessageHandler] = []
 
+    encoders: dict[type, cbor2.EncoderHook] = {}
     def post_message(self, message: Message) -> None:
         payload = cbor2.dumps(message)
         if len(payload) > self.max_message_bytes:
