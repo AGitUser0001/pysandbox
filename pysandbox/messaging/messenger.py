@@ -58,7 +58,7 @@ class Messenger:
 
     encoders: dict[type, cbor2.EncoderHook] = field(default_factory=dict)
     def post_message(self, message: Message) -> None:
-        payload = cbor2.dumps(message)
+        payload = cbor2.dumps(message, encoders=self.encoders)
         if len(payload) > self.max_message_bytes:
             raise MessengerMessageTooLargeError(
                 f"message exceeds {self.max_message_bytes} bytes"
