@@ -1,5 +1,6 @@
 import struct
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
@@ -7,6 +8,8 @@ from typing import BinaryIO
 
 __all__ = [
     "FileTransport",
+    "FileTransportError",
+    "FileTransportFrameTooLargeError",
 ]
 
 
@@ -16,6 +19,15 @@ TRUNCATE_FRAME = b"T"
 FRAME_HEADER_SIZE = 9
 FRAME_HEADER_FORMAT = ">Q"
 DEFAULT_ROTATE_AFTER_BYTES = 1024 * 1024
+DEFAULT_MAX_FILE_BYTES = DEFAULT_ROTATE_AFTER_BYTES * 2
+
+
+class FileTransportError(Exception):
+    """Base error for file transport failures."""
+
+
+class FileTransportFrameTooLargeError(FileTransportError):
+    """Raised when a file transport frame exceeds the configured limit."""
 
 
 @dataclass
@@ -24,6 +36,8 @@ class FileTransport:
     write_paths: tuple[str | Path, str | Path]
     poll_interval: float = 0.001
     rotate_after_bytes: int = DEFAULT_ROTATE_AFTER_BYTES
+    max_frame_bytes: int | Callable[[], int | None] | None = None
+    max_file_bytes: int | Callable[[], int | None] | None = DEFAULT_MAX_FILE_BYTES
     read_index: int = 0
     write_index: int = 0
     offsets: list[int] = field(default_factory=lambda: [0, 0])
@@ -109,6 +123,12 @@ class FileTransport:
 
             frame_type = header[:1]
             size = struct.unpack(FRAME_HEADER_FORMAT, header[1:])[0]
+            max_frame_bytes = self.current_limit(self.max_frame_bytes)
+            if max_frame_bytes is not None and size > max_frame_bytes:
+                raise FileTransportFrameTooLargeError(
+                    f"file transport frame exceeds {max_frame_bytes} bytes"
+                )
+
             payload = stream.read(size)
             if len(payload) < size:
                 return None
@@ -151,6 +171,20 @@ class FileTransport:
 
         return total
 
+    def total_file_bytes(self) -> int:
+        return sum(self.file_size(Path(path)) for path in self.read_paths)
+
+    def check_file_size_limit(self) -> None:
+        max_file_bytes = self.current_limit(self.max_file_bytes)
+        if max_file_bytes is None:
+            return
+
+        total = self.total_file_bytes()
+        if total > max_file_bytes:
+            raise FileTransportFrameTooLargeError(
+                f"file transport files exceed {max_file_bytes} bytes"
+            )
+
     def close(self) -> None:
         for stream in (*self._read_streams, *self._write_streams):
             if stream is not None:
@@ -159,6 +193,21 @@ class FileTransport:
     @staticmethod
     def frame_size(payload_size: int) -> int:
         return FRAME_HEADER_SIZE + payload_size
+
+    @staticmethod
+    def current_limit(
+        limit: int | Callable[[], int | None] | None,
+    ) -> int | None:
+        if callable(limit):
+            limit = limit()
+
+        if limit is None:
+            return None
+
+        if limit <= 0:
+            raise ValueError("transport limits must be positive")
+
+        return limit
 
     @staticmethod
     def file_size(path: Path) -> int:

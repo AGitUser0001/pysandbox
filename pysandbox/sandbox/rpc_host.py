@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import ctypes
 import inspect
 import os
@@ -12,11 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, overload
 
-from ..messaging import Messenger, FileTransport
+import cbor2
+
+from ..messaging import FileTransport, FileTransportError, Messenger, MessengerError
 
 
 __all__ = [
     "RpcHandler",
+    "RpcHandlerCancelled",
     "RpcHandlerDecorator",
     "RpcHost",
 ]
@@ -26,9 +30,15 @@ RpcHandler = Callable[..., Any]
 RpcHandlerDecorator = Callable[[RpcHandler], RpcHandler]
 
 
+class RpcHandlerCancelled(Exception):
+    """Raised when guest execution cancellation reaches an RPC handler."""
+
+
 @dataclass
 class RpcHost:
     handlers: dict[str, RpcHandler] = field(default_factory=dict)
+    event_loop: asyncio.AbstractEventLoop | None = None
+    handler_cancel_grace: float = 1.0
     _send_lock: threading.RLock = field(default_factory=threading.RLock)
     _worker_condition: threading.Condition = field(
         default_factory=lambda: threading.Condition(threading.RLock())
@@ -104,11 +114,14 @@ class RpcHost:
         max_request_bytes: int | Callable[[], int],
         on_oversized_request: Callable[[], None],
         on_messenger_ready: Callable[[Messenger], None] | None = None,
+        event_loop: asyncio.AbstractEventLoop | None = None,
+        handler_cancel_grace: float | None = None,
         poll_interval: float = 0.001,
     ) -> None:
         transport = FileTransport(
             read_paths=request_files,
             write_paths=response_files,
+            max_frame_bytes=max_request_bytes,
             poll_interval=poll_interval,
         )
         messenger = Messenger(transport)
@@ -119,7 +132,11 @@ class RpcHost:
         try:
             while not stop.is_set():
                 try:
+                    transport.check_file_size_limit()
                     unread_size = transport.total_available_bytes()
+                except FileTransportError:
+                    on_oversized_request()
+                    return
                 except OSError:
                     waiter.wait(stop)
                     continue
@@ -137,17 +154,43 @@ class RpcHost:
                     waiter.wait(stop)
                     continue
 
-                self.dispatch_next_with(messenger)
+                try:
+                    self.dispatch_next_with(
+                        messenger,
+                        stop=stop,
+                        event_loop=event_loop,
+                        handler_cancel_grace=handler_cancel_grace,
+                    )
+                except (
+                    FileTransportError,
+                    MessengerError,
+                    cbor2.CBORDecodeError,
+                    OverflowError,
+                ):
+                    on_oversized_request()
+                    return
         finally:
             waiter.close()
             messenger.close()
 
-    def dispatch_next_with(self, messenger: Messenger) -> None:
+    def dispatch_next_with(
+        self,
+        messenger: Messenger,
+        *,
+        stop: threading.Event | None = None,
+        event_loop: asyncio.AbstractEventLoop | None = None,
+        handler_cancel_grace: float | None = None,
+    ) -> None:
         message = messenger.receive_message()
         if self.accept_worker_response(message):
             return
 
-        response = self.response_for_message(message)
+        response = self.response_for_message(
+            message,
+            stop=stop,
+            event_loop=event_loop,
+            handler_cancel_grace=handler_cancel_grace,
+        )
         if response is not None:
             with self._send_lock:
                 messenger.post_message(response)
@@ -224,7 +267,14 @@ class RpcHost:
 
             return self._worker_responses.pop(request_id)
 
-    def response_for_message(self, message: object) -> dict[str, Any] | None:
+    def response_for_message(
+        self,
+        message: object,
+        *,
+        stop: threading.Event | None = None,
+        event_loop: asyncio.AbstractEventLoop | None = None,
+        handler_cancel_grace: float | None = None,
+    ) -> dict[str, Any] | None:
         if not isinstance(message, dict):
             return None
 
@@ -258,7 +308,14 @@ class RpcHost:
             return self.error_response(request_id, f"unknown method: {method}")
 
         try:
-            result = resolve_handler_result(handler(*args, **kwargs))
+            result = self.run_handler(
+                handler,
+                tuple(args),
+                kwargs,
+                stop=stop,
+                event_loop=event_loop,
+                handler_cancel_grace=handler_cancel_grace,
+            )
         except BaseException as exc:
             return self.error_response(
                 request_id,
@@ -268,6 +325,69 @@ class RpcHost:
             )
 
         return self.result_response(request_id, result)
+
+    def run_handler(
+        self,
+        handler: RpcHandler,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        stop: threading.Event | None = None,
+        event_loop: asyncio.AbstractEventLoop | None = None,
+        handler_cancel_grace: float | None = None,
+    ) -> Any:
+        if stop is not None and stop.is_set():
+            raise RpcHandlerCancelled("RPC handler was cancelled")
+
+        result = handler(*args, **kwargs)
+        if not inspect.isawaitable(result):
+            if stop is not None and stop.is_set():
+                raise RpcHandlerCancelled("RPC handler was cancelled")
+            return result
+
+        loop = event_loop or self.event_loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            close_awaitable(result)
+            raise RuntimeError("async RPC handlers require a running event loop")
+
+        future = asyncio.run_coroutine_threadsafe(
+            resolve_handler_result(result),
+            loop,
+        )
+        return self.wait_handler_future(
+            future,
+            stop=stop,
+            cancel_grace=(
+                self.handler_cancel_grace
+                if handler_cancel_grace is None
+                else handler_cancel_grace
+            )
+        )
+
+    def wait_handler_future(
+        self,
+        future: concurrent.futures.Future[Any],
+        *,
+        stop: threading.Event | None,
+        cancel_grace: float,
+    ) -> Any:
+        if stop is None:
+            return future.result()
+
+        while True:
+            try:
+                return future.result(timeout=0.01)
+            except concurrent.futures.TimeoutError:
+                if not stop.is_set():
+                    continue
+
+                future.cancel()
+                with suppress(
+                    concurrent.futures.CancelledError,
+                    concurrent.futures.TimeoutError,
+                ):
+                    future.result(timeout=cancel_grace)
+                raise RpcHandlerCancelled("RPC handler was cancelled")
 
     def result_response(self, request_id: object, result: Any) -> dict[str, Any]:
         return {
@@ -308,11 +428,14 @@ def rpc_handler_name(handler: RpcHandler) -> str:
     return name
 
 
-def resolve_handler_result(result: Any) -> Any:
-    if not inspect.iscoroutine(result):
-        return result
+async def resolve_handler_result(result: Any) -> Any:
+    return await result
 
-    return asyncio.run(result)
+
+def close_awaitable(result: Any) -> None:
+    close = getattr(result, "close", None)
+    if callable(close):
+        close()
 
 
 class RequestWaiter:
@@ -339,30 +462,34 @@ class KqueueRequestWaiter(RequestWaiter):
     queue: select.kqueue | None = None
 
     def __post_init__(self) -> None:
-        self.queue = select.kqueue()
-        events: list[select.kevent] = []
-        flags = select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_CLEAR
-        fflags = (
-            select.KQ_NOTE_WRITE
-            | select.KQ_NOTE_EXTEND
-            | select.KQ_NOTE_DELETE
-            | select.KQ_NOTE_RENAME
-            | select.KQ_NOTE_ATTRIB
-        )
-
-        for path in self.paths:
-            stream = path.open("rb", buffering=0)
-            self.streams.append(stream)
-            events.append(
-                select.kevent(
-                    stream.fileno(),
-                    filter=select.KQ_FILTER_VNODE,
-                    flags=flags,
-                    fflags=fflags,
-                )
+        try:
+            self.queue = select.kqueue()
+            events: list[select.kevent] = []
+            flags = select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_CLEAR
+            fflags = (
+                select.KQ_NOTE_WRITE
+                | select.KQ_NOTE_EXTEND
+                | select.KQ_NOTE_DELETE
+                | select.KQ_NOTE_RENAME
+                | select.KQ_NOTE_ATTRIB
             )
 
-        self.queue.control(events, 0, 0)
+            for path in self.paths:
+                stream = path.open("rb", buffering=0)
+                self.streams.append(stream)
+                events.append(
+                    select.kevent(
+                        stream.fileno(),
+                        filter=select.KQ_FILTER_VNODE,
+                        flags=flags,
+                        fflags=fflags,
+                    )
+                )
+
+            self.queue.control(events, 0, 0)
+        except OSError:
+            self.close()
+            raise
 
     def wait(self, stop: threading.Event) -> None:
         if self.queue is None:

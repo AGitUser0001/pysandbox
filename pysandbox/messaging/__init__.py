@@ -7,11 +7,17 @@ from .messenger import (
     MessengerMessageTooLargeError,
     Transport,
 )
-from .transports import FileTransport
+from .transports import (
+    FileTransport,
+    FileTransportError,
+    FileTransportFrameTooLargeError,
+)
 
 
 __all__ = [
     "FileTransport",
+    "FileTransportError",
+    "FileTransportFrameTooLargeError",
     "Message",
     "MessageHandler",
     "Messenger",

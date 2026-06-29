@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from multiprocessing.context import SpawnProcess
 from pathlib import Path
@@ -40,6 +41,9 @@ __all__ = [
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
+_rpc_event_loop_context: ContextVar[asyncio.AbstractEventLoop | None] = (
+    ContextVar("pysandbox_rpc_event_loop", default=None)
+)
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,7 @@ class PythonMessagePipe:
 @dataclass
 class PythonRuntimeParameters(RuntimeParameters):
     message_pipe: PythonMessagePipe | None = None
+    event_loop: asyncio.AbstractEventLoop | None = None
 
 
 @dataclass
@@ -211,6 +216,13 @@ class PythonWorker(Worker):
             kwargs,
             timeout=timeout,
         )
+
+
+def inherited_rpc_event_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return _rpc_event_loop_context.get()
 
 
 def windows_acl_identity() -> str:
@@ -338,6 +350,7 @@ class PythonRuntime(Runtime):
             stdin=stdin,
             mounts=mounts,
             message_pipe=message_pipe,
+            event_loop=inherited_rpc_event_loop(),
         )
 
     def prepare_program(self, program: str | bytes, limits: RuntimeLimits) -> bytes:
@@ -396,12 +409,17 @@ class PythonRuntime(Runtime):
         after_start: RuntimeStartCallback | None = None,
         spin: bool = False,
     ) -> PythonWorker:
-        worker = super().run(
-            self.spin_program(program) if spin else program,
-            limits=limits,
-            timeout=timeout,
-            after_start=after_start,
-        )
+        loop = asyncio.get_running_loop()
+        token = _rpc_event_loop_context.set(loop)
+        try:
+            worker = super().run(
+                self.spin_program(program) if spin else program,
+                limits=limits,
+                timeout=timeout,
+                after_start=after_start,
+            )
+        finally:
+            _rpc_event_loop_context.reset(token)
         return PythonWorker(
             runtime=worker.runtime,
             task=worker.task,
@@ -470,6 +488,7 @@ class PythonRuntime(Runtime):
                 "max_request_bytes": execution.max_request_bytes,
                 "on_oversized_request": violation.set,
                 "on_messenger_ready": execution.set_messenger,
+                "event_loop": self.rpc.event_loop or parameters.event_loop,
             },
             name="python-rpc-host",
             daemon=True,
