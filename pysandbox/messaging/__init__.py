@@ -11,6 +11,7 @@ from .transports import (
     FileTransport,
     FileTransportError,
     FileTransportFrameTooLargeError,
+    FileTransportStoppedError,
 )
 
 
@@ -18,6 +19,7 @@ __all__ = [
     "FileTransport",
     "FileTransportError",
     "FileTransportFrameTooLargeError",
+    "FileTransportStoppedError",
     "Message",
     "MessageHandler",
     "Messenger",

@@ -44,6 +44,7 @@ class RpcHost:
         default_factory=lambda: threading.Condition(threading.RLock())
     )
     _worker_responses: dict[int, dict[str, Any]] = field(default_factory=dict)
+    _pending_worker_request_ids: set[int] = field(default_factory=set)
     _next_worker_request_id: int = 0
 
     @overload
@@ -89,6 +90,7 @@ class RpcHost:
         state["_send_lock"] = None
         state["_worker_condition"] = None
         state["_worker_responses"] = {}
+        state["_pending_worker_request_ids"] = set()
         state["_next_worker_request_id"] = 0
         return state
 
@@ -99,6 +101,7 @@ class RpcHost:
         self._send_lock = threading.RLock()
         self._worker_condition = threading.Condition(threading.RLock())
         self._worker_responses = {}
+        self._pending_worker_request_ids = set()
         self._next_worker_request_id = 0
 
     @property
@@ -123,6 +126,7 @@ class RpcHost:
             write_paths=response_files,
             max_frame_bytes=max_request_bytes,
             poll_interval=poll_interval,
+            stop=stop,
         )
         messenger = Messenger(transport)
         waiter = request_waiter(request_files, poll_interval=poll_interval)
@@ -167,6 +171,9 @@ class RpcHost:
                     cbor2.CBORDecodeError,
                     OverflowError,
                 ):
+                    if stop.is_set():
+                        return
+
                     on_oversized_request()
                     return
         finally:
@@ -207,6 +214,9 @@ class RpcHost:
             return True
 
         with self._worker_condition:
+            if request_id not in self._pending_worker_request_ids:
+                return True
+
             self._worker_responses[request_id] = message
             self._worker_condition.notify_all()
 
@@ -222,16 +232,20 @@ class RpcHost:
         timeout: float | None = None,
     ) -> Any:
         request_id = self.next_worker_request_id()
-        with self._send_lock:
-            messenger.post_message(
-                {
-                    "type": "worker_call",
-                    "id": request_id,
-                    "fn_path": fn_path,
-                    "args": args,
-                    "kwargs": dict(kwargs),
-                }
-            )
+        try:
+            with self._send_lock:
+                messenger.post_message(
+                    {
+                        "type": "worker_call",
+                        "id": request_id,
+                        "fn_path": fn_path,
+                        "args": args,
+                        "kwargs": dict(kwargs),
+                    }
+                )
+        except BaseException:
+            self.discard_worker_request(request_id)
+            raise
 
         response = self.wait_worker_response(request_id, timeout=timeout)
         if response.get("ok"):
@@ -243,7 +257,13 @@ class RpcHost:
         with self._worker_condition:
             request_id = self._next_worker_request_id
             self._next_worker_request_id += 1
+            self._pending_worker_request_ids.add(request_id)
             return request_id
+
+    def discard_worker_request(self, request_id: int) -> None:
+        with self._worker_condition:
+            self._pending_worker_request_ids.discard(request_id)
+            self._worker_responses.pop(request_id, None)
 
     def wait_worker_response(
         self,
@@ -261,10 +281,13 @@ class RpcHost:
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self._pending_worker_request_ids.discard(request_id)
+                    self._worker_responses.pop(request_id, None)
                     raise TimeoutError("worker call timed out")
 
                 self._worker_condition.wait(remaining)
 
+            self._pending_worker_request_ids.discard(request_id)
             return self._worker_responses.pop(request_id)
 
     def response_for_message(

@@ -1,4 +1,5 @@
 import struct
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ __all__ = [
     "FileTransport",
     "FileTransportError",
     "FileTransportFrameTooLargeError",
+    "FileTransportStoppedError",
 ]
 
 
@@ -30,6 +32,10 @@ class FileTransportFrameTooLargeError(FileTransportError):
     """Raised when a file transport frame exceeds the configured limit."""
 
 
+class FileTransportStoppedError(FileTransportError):
+    """Raised when a file transport read is stopped before a frame completes."""
+
+
 @dataclass
 class FileTransport:
     read_paths: tuple[str | Path, str | Path]
@@ -38,6 +44,7 @@ class FileTransport:
     rotate_after_bytes: int = DEFAULT_ROTATE_AFTER_BYTES
     max_frame_bytes: int | Callable[[], int | None] | None = None
     max_file_bytes: int | Callable[[], int | None] | None = DEFAULT_MAX_FILE_BYTES
+    stop: threading.Event | None = None
     read_index: int = 0
     write_index: int = 0
     offsets: list[int] = field(default_factory=lambda: [0, 0])
@@ -89,8 +96,10 @@ class FileTransport:
 
     def read_data_frame(self) -> bytes:
         while True:
+            self.check_stopped()
             frame = self.read_next_frame()
             if frame is None:
+                self.check_stopped()
                 time.sleep(self.poll_interval)
                 continue
 
@@ -184,6 +193,10 @@ class FileTransport:
             raise FileTransportFrameTooLargeError(
                 f"file transport files exceed {max_file_bytes} bytes"
             )
+
+    def check_stopped(self) -> None:
+        if self.stop is not None and self.stop.is_set():
+            raise FileTransportStoppedError("file transport read stopped")
 
     def close(self) -> None:
         for stream in (*self._read_streams, *self._write_streams):
