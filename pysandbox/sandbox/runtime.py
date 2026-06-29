@@ -333,8 +333,6 @@ class Runtime(abc.ABC):
         self,
         program: str | bytes,
         limits: RuntimeLimits,
-        *,
-        loop: asyncio.AbstractEventLoop | None = None,
     ) -> RuntimeParameters:
         raise NotImplementedError
 
@@ -353,11 +351,7 @@ class Runtime(abc.ABC):
             result = RuntimeResult()
 
         execution_limits = limits or RuntimeLimits()
-        parameters = self.generate_runtime_parameters(
-            program,
-            execution_limits,
-            loop=loop,
-        )
+        parameters = self.generate_runtime_parameters(program, execution_limits)
 
         def capture_start(
             process: SpawnProcess,
@@ -379,6 +373,7 @@ class Runtime(abc.ABC):
             parameters,
             timeout=timeout,
             after_start=capture_start,
+            loop=loop,
         )
         try:
             try:
@@ -497,6 +492,7 @@ class Runtime(abc.ABC):
         *,
         timeout: float | None = None,
         after_start: RuntimeWorkerStartCallback | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> tuple[Connection, Connection, Connection, SpawnProcess, object | None]:
         parent_connection, child_connection = self.create_worker_pipe()
         parent_output_connection, child_output_connection = self.create_worker_pipe()
@@ -508,7 +504,7 @@ class Runtime(abc.ABC):
             child_control_connection,
             timeout=timeout,
         )
-        execution = self.before_worker_start(parameters)
+        execution = self.before_worker_start(parameters, loop=loop)
         try:
             with self.suppress_main_module_fixup():
                 process.start()
@@ -634,7 +630,12 @@ class Runtime(abc.ABC):
     def suppress_main_module_fixup(self) -> MainModuleFixupSuppressed:
         return MainModuleFixupSuppressed()
 
-    def before_worker_start(self, parameters: RuntimeParameters) -> object | None:
+    def before_worker_start(
+        self,
+        parameters: RuntimeParameters,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> object | None:
         return None
 
     def after_worker_finish(

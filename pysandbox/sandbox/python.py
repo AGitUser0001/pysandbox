@@ -150,7 +150,6 @@ class PythonMessagePipe:
 @dataclass
 class PythonRuntimeParameters(RuntimeParameters):
     message_pipe: PythonMessagePipe | None = None
-    event_loop: asyncio.AbstractEventLoop | None = None
 
 
 @dataclass
@@ -286,8 +285,6 @@ class PythonRuntime(Runtime):
         self,
         program: str | bytes,
         limits: RuntimeLimits,
-        *,
-        loop: asyncio.AbstractEventLoop | None = None,
     ) -> RuntimeParameters:
         install = self.ensure_runtime()
         stdin = self.prepare_program(program, limits)
@@ -341,7 +338,6 @@ class PythonRuntime(Runtime):
             stdin=stdin,
             mounts=mounts,
             message_pipe=message_pipe,
-            event_loop=loop,
         )
 
     def prepare_program(self, program: str | bytes, limits: RuntimeLimits) -> bytes:
@@ -449,7 +445,12 @@ class PythonRuntime(Runtime):
     ) -> None:
         return
 
-    def before_worker_start(self, parameters: RuntimeParameters) -> object | None:
+    def before_worker_start(
+        self,
+        parameters: RuntimeParameters,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> object | None:
         if not isinstance(parameters, PythonRuntimeParameters):
             return None
 
@@ -476,7 +477,7 @@ class PythonRuntime(Runtime):
                 "max_request_bytes": execution.max_request_bytes,
                 "on_oversized_request": violation.set,
                 "on_messenger_ready": execution.set_messenger,
-                "event_loop": self.rpc.event_loop or parameters.event_loop,
+                "event_loop": self.rpc.event_loop or loop,
             },
             name="python-rpc-host",
             daemon=True,
