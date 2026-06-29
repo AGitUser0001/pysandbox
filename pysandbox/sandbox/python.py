@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from multiprocessing.context import SpawnProcess
 from pathlib import Path
@@ -41,9 +40,6 @@ __all__ = [
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
-_rpc_event_loop_context: ContextVar[asyncio.AbstractEventLoop | None] = (
-    ContextVar("pysandbox_rpc_event_loop", default=None)
-)
 
 
 @dataclass(frozen=True)
@@ -218,13 +214,6 @@ class PythonWorker(Worker):
         )
 
 
-def inherited_rpc_event_loop() -> asyncio.AbstractEventLoop | None:
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return _rpc_event_loop_context.get()
-
-
 def windows_acl_identity() -> str:
     username = os.environ.get("USERNAME")
     domain = os.environ.get("USERDOMAIN")
@@ -297,6 +286,8 @@ class PythonRuntime(Runtime):
         self,
         program: str | bytes,
         limits: RuntimeLimits,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> RuntimeParameters:
         install = self.ensure_runtime()
         stdin = self.prepare_program(program, limits)
@@ -350,7 +341,7 @@ class PythonRuntime(Runtime):
             stdin=stdin,
             mounts=mounts,
             message_pipe=message_pipe,
-            event_loop=inherited_rpc_event_loop(),
+            event_loop=loop,
         )
 
     def prepare_program(self, program: str | bytes, limits: RuntimeLimits) -> bytes:
@@ -389,6 +380,7 @@ class PythonRuntime(Runtime):
         after_start: RuntimeStartCallback | None = None,
         worker_after_start: RuntimeWorkerStartCallback | None = None,
         result: RuntimeResult | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
         spin: bool = False,
     ) -> RuntimeResult:
         return super().execute(
@@ -398,6 +390,7 @@ class PythonRuntime(Runtime):
             after_start=after_start,
             worker_after_start=worker_after_start,
             result=result,
+            loop=loop,
         )
 
     def run(
@@ -409,17 +402,12 @@ class PythonRuntime(Runtime):
         after_start: RuntimeStartCallback | None = None,
         spin: bool = False,
     ) -> PythonWorker:
-        loop = asyncio.get_running_loop()
-        token = _rpc_event_loop_context.set(loop)
-        try:
-            worker = super().run(
-                self.spin_program(program) if spin else program,
-                limits=limits,
-                timeout=timeout,
-                after_start=after_start,
-            )
-        finally:
-            _rpc_event_loop_context.reset(token)
+        worker = super().run(
+            self.spin_program(program) if spin else program,
+            limits=limits,
+            timeout=timeout,
+            after_start=after_start,
+        )
         return PythonWorker(
             runtime=worker.runtime,
             task=worker.task,

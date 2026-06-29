@@ -333,6 +333,8 @@ class Runtime(abc.ABC):
         self,
         program: str | bytes,
         limits: RuntimeLimits,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> RuntimeParameters:
         raise NotImplementedError
 
@@ -345,12 +347,17 @@ class Runtime(abc.ABC):
         after_start: RuntimeStartCallback | None = None,
         worker_after_start: RuntimeWorkerStartCallback | None = None,
         result: RuntimeResult | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> RuntimeResult:
         if result is None:
             result = RuntimeResult()
 
         execution_limits = limits or RuntimeLimits()
-        parameters = self.generate_runtime_parameters(program, execution_limits)
+        parameters = self.generate_runtime_parameters(
+            program,
+            execution_limits,
+            loop=loop,
+        )
 
         def capture_start(
             process: SpawnProcess,
@@ -459,6 +466,7 @@ class Runtime(abc.ABC):
                     after_start=after_start,
                     worker_after_start=capture_start,
                     result=result,
+                    loop=loop,
                 )
             except BaseException as exc:
                 loop.call_soon_threadsafe(set_execution_exception, exc)
