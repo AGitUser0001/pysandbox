@@ -71,8 +71,30 @@ class RuntimeSetupError(RuntimeError):
     """Raised when a runtime cannot be prepared."""
 
 
+class RuntimeWorkerTraceback(RuntimeError):
+    def __init__(self, traceback: str) -> None:
+        super().__init__()
+        self.traceback = traceback
+
+    def __str__(self) -> str:
+        return self.traceback
+
+
 class RuntimeExecutionError(RuntimeError):
     """Raised when a runtime fails while executing guest code."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str | None = None,
+        traceback: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.type = error_type
+        self.traceback = traceback
+        if traceback is not None:
+            self.__cause__ = RuntimeWorkerTraceback(traceback)
 
 
 class RuntimeOutputLimitError(RuntimeError):
@@ -397,7 +419,9 @@ class Runtime(abc.ABC):
 
             if isinstance(response, WorkerFailure):
                 raise RuntimeExecutionError(
-                    f"{response.error_type}: {response.message}\n{response.traceback}"
+                    response.message,
+                    error_type=response.error_type,
+                    traceback=response.traceback,
                 )
 
             result.elapsed = response.elapsed
