@@ -9,8 +9,58 @@ from .messenger import Messenger
 from .transports import FileTransport
 
 
+class HostTraceback(Exception):
+    def __init__(self, traceback: str) -> None:
+        super().__init__()
+        self.traceback = traceback
+
+    def __str__(self) -> str:
+        return self.traceback
+
+
 class HostCallError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str | None = None,
+        traceback: str | None = None,
+        error: object = None,
+    ) -> None:
+        super().__init__(message)
+        self.type = error_type
+        self.traceback = traceback
+        self.error = error
+        if traceback is not None:
+            self.__cause__ = HostTraceback(traceback)
+
+    @classmethod
+    def from_error(
+        cls,
+        error: object,
+        *,
+        traceback: object = None,
+    ) -> "HostCallError":
+        if not isinstance(error, dict):
+            return cls(
+                str(error),
+                traceback=traceback if isinstance(traceback, str) else None,
+                error=error,
+            )
+
+        message = error.get("message")
+        error_type = error.get("type")
+        nested_traceback = error.get("traceback")
+        traceback_text = traceback if isinstance(traceback, str) else nested_traceback
+        sanitized_error = dict(error)
+        sanitized_error.pop("traceback", None)
+
+        return cls(
+            str(message),
+            error_type=error_type if isinstance(error_type, str) else None,
+            traceback=traceback_text if isinstance(traceback_text, str) else None,
+            error=sanitized_error,
+        )
 
 
 _messenger: Messenger | None = None
@@ -61,8 +111,10 @@ def call(method: str, *args: Any, **kwargs: Any) -> Any:
     if message.get("ok"):
         return message.get("result")
 
-    error = message.get("error")
-    raise HostCallError(str(error))
+    raise HostCallError.from_error(
+        message.get("error"),
+        traceback=message.get("traceback"),
+    )
 
 
 def receive_response(messenger: Messenger, request_id: int) -> object:

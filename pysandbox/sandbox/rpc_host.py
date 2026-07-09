@@ -432,15 +432,17 @@ class RpcHost:
             "type": error_type,
             "message": message,
         }
-        if traceback_text is not None:
-            error["traceback"] = traceback_text
 
-        return {
+        response: dict[str, Any] = {
             "type": "response",
             "id": request_id,
             "ok": False,
             "error": error,
         }
+        if traceback_text is not None:
+            response["traceback"] = traceback_text
+
+        return response
 
 
 def rpc_handler_name(handler: RpcHandler) -> str:
