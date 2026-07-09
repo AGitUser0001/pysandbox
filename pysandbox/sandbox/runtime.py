@@ -408,9 +408,9 @@ class Runtime(abc.ABC):
                     timeout=timeout,
                 )
             finally:
-                parent_connection.close()
-                parent_output_connection.close()
-                parent_control_connection.close()
+                close_connection(parent_connection)
+                close_connection(parent_output_connection)
+                close_connection(parent_control_connection)
 
             process.join(timeout=1)
             if process.is_alive():
@@ -532,9 +532,9 @@ class Runtime(abc.ABC):
         try:
             with self.suppress_main_module_fixup():
                 process.start()
-            child_connection.close()
-            child_output_connection.close()
-            child_control_connection.close()
+            close_connection(child_connection)
+            close_connection(child_output_connection)
+            close_connection(child_control_connection)
             if after_start is not None:
                 after_start(process, execution, parent_control_connection)
             return (
@@ -545,12 +545,12 @@ class Runtime(abc.ABC):
                 execution,
             )
         except BaseException:
-            parent_connection.close()
-            parent_output_connection.close()
-            parent_control_connection.close()
-            child_connection.close()
-            child_output_connection.close()
-            child_control_connection.close()
+            close_connection(parent_connection)
+            close_connection(parent_output_connection)
+            close_connection(parent_control_connection)
+            close_connection(child_connection)
+            close_connection(child_output_connection)
+            close_connection(child_control_connection)
             self.terminate_process(process)
             self.after_worker_finish(parameters, execution=execution)
             raise
@@ -1007,7 +1007,7 @@ class Worker:
         finally:
             control_connection = self.control_connection()
             if control_connection is not None:
-                control_connection.close()
+                close_connection(control_connection)
 
 
 def encode_output_event(event: OutputEvent) -> bytes:
@@ -1028,6 +1028,13 @@ def decode_output_event(packet: bytes) -> OutputEvent:
         source=source.decode("utf-8"),
         data=data,
     )
+
+
+def close_connection(connection: Connection) -> None:
+    try:
+        connection.close()
+    except OSError:
+        return
 
 
 def drain_limit_updates(
@@ -1091,9 +1098,9 @@ def runtime_worker_entrypoint(
             )
         )
     finally:
-        connection.close()
-        output_connection.close()
-        control_connection.close()
+        close_connection(connection)
+        close_connection(output_connection)
+        close_connection(control_connection)
 
 
 def write_worker_stdin(write_fd: int, stdin: bytes) -> None:
