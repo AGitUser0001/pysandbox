@@ -10,6 +10,7 @@ from typing import BinaryIO
 __all__ = [
     "FileTransport",
     "FileTransportError",
+    "FileTransportFileTooLargeError",
     "FileTransportFrameTooLargeError",
     "FileTransportStoppedError",
 ]
@@ -30,6 +31,10 @@ class FileTransportError(Exception):
 
 class FileTransportFrameTooLargeError(FileTransportError):
     """Raised when a file transport frame exceeds the configured limit."""
+
+
+class FileTransportFileTooLargeError(FileTransportError):
+    """Raised when a transport direction exceeds its combined file quota."""
 
 
 class FileTransportStoppedError(FileTransportError):
@@ -162,6 +167,7 @@ class FileTransport:
         self.write_index = 1 - self.write_index
 
     def append_frame(self, frame_type: bytes, payload: bytes) -> None:
+        self.check_write_file_size_limit(self.frame_size(len(payload)))
         stream = self.write_stream
         stream.write(
             frame_type
@@ -183,6 +189,9 @@ class FileTransport:
     def total_file_bytes(self) -> int:
         return sum(self.file_size(Path(path)) for path in self.read_paths)
 
+    def total_write_file_bytes(self) -> int:
+        return sum(self.file_size(Path(path)) for path in self.write_paths)
+
     def check_file_size_limit(self) -> None:
         max_file_bytes = self.current_limit(self.max_file_bytes)
         if max_file_bytes is None:
@@ -190,8 +199,19 @@ class FileTransport:
 
         total = self.total_file_bytes()
         if total > max_file_bytes:
-            raise FileTransportFrameTooLargeError(
+            raise FileTransportFileTooLargeError(
                 f"file transport files exceed {max_file_bytes} bytes"
+            )
+
+    def check_write_file_size_limit(self, additional_bytes: int) -> None:
+        max_file_bytes = self.current_limit(self.max_file_bytes)
+        if max_file_bytes is None:
+            return
+
+        total = self.total_write_file_bytes() + additional_bytes
+        if total > max_file_bytes:
+            raise FileTransportFileTooLargeError(
+                f"file transport files would exceed {max_file_bytes} bytes"
             )
 
     def check_stopped(self) -> None:

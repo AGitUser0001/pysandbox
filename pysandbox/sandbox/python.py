@@ -185,6 +185,10 @@ class PythonRpcExecution:
         with self.limits_lock:
             return self.limits.max_rpc_message_bytes
 
+    def max_file_bytes(self) -> int:
+        with self.limits_lock:
+            return self.limits.max_rpc_file_bytes
+
 
 @dataclass
 class PythonWorker(Worker):
@@ -303,6 +307,7 @@ class PythonRuntime(Runtime):
                 {
                     "PYSANDBOX_RPC_DIR": message_pipe.guest_dir,
                     "PYSANDBOX_RPC_METHODS": ",".join(self.rpc_methods()),
+                    "PYSANDBOX_RPC_FILE_BYTES": str(limits.max_rpc_file_bytes),
                 }
             )
             mounts.append(
@@ -475,6 +480,7 @@ class PythonRuntime(Runtime):
             ),
             kwargs={
                 "max_request_bytes": execution.max_request_bytes,
+                "max_file_bytes": execution.max_file_bytes,
                 "on_oversized_request": violation.set,
                 "on_messenger_ready": execution.set_messenger,
                 "event_loop": self.rpc.event_loop or loop,
@@ -537,6 +543,8 @@ class PythonRuntime(Runtime):
 
         if isinstance(execution, PythonRpcExecution):
             execution.stop.set()
+            if execution.messenger is not None:
+                self.rpc.close_worker(execution.messenger)
             execution.thread.join(timeout=1)
 
         if parameters.message_pipe is not None:

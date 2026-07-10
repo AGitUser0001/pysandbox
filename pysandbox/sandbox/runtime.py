@@ -115,10 +115,10 @@ class RuntimeLimits:
     max_wasm_stack: int = 512 * 1024
     max_output_bytes: int = 256 * 1024
     max_rpc_message_bytes: int = 256 * 1024
+    max_rpc_file_bytes: int = 2 * 1024 * 1024
     wasmtime_cache: bool = True
     fuel: int | None = None
     replenish_fuel_interval: float | None = None
-    epoch_deadline_ticks: int | None = None
 
 
 @dataclass
@@ -791,11 +791,17 @@ class Runtime(abc.ABC):
         if self.fuel_enabled(limits):
             config.consume_fuel = True
 
-        if limits.epoch_deadline_ticks is not None or timeout is not None:
+        if timeout is not None:
             config.epoch_interruption = True
 
     @staticmethod
     def validate_limits(limits: RuntimeLimits) -> None:
+        if limits.max_rpc_message_bytes <= 0:
+            raise ValueError("max_rpc_message_bytes must be positive")
+
+        if limits.max_rpc_file_bytes <= 0:
+            raise ValueError("max_rpc_file_bytes must be positive")
+
         if limits.replenish_fuel_interval is not None:
             if limits.fuel is None:
                 raise ValueError("replenish_fuel_interval requires fuel")
@@ -826,13 +832,10 @@ class Runtime(abc.ABC):
             if timeout <= 0:
                 raise ValueError("timeout must be positive")
 
-            store.set_epoch_deadline(limits.epoch_deadline_ticks or 1)
+            store.set_epoch_deadline(1)
             timer = EpochTimer(engine=engine, timeout=timeout)
             timer.start()
             return timer
-
-        if limits.epoch_deadline_ticks is not None:
-            store.set_epoch_deadline(limits.epoch_deadline_ticks)
 
         return None
 

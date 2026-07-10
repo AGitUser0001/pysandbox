@@ -6,7 +6,6 @@ import os
 import select
 import threading
 import time
-import traceback
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -45,6 +44,8 @@ class RpcHost:
     )
     _worker_responses: dict[int, dict[str, Any]] = field(default_factory=dict)
     _pending_worker_request_ids: set[int] = field(default_factory=set)
+    _pending_worker_messengers: dict[int, Messenger] = field(default_factory=dict)
+    _worker_request_failures: dict[int, BaseException] = field(default_factory=dict)
     _next_worker_request_id: int = 0
 
     @overload
@@ -91,6 +92,8 @@ class RpcHost:
         state["_worker_condition"] = None
         state["_worker_responses"] = {}
         state["_pending_worker_request_ids"] = set()
+        state["_pending_worker_messengers"] = {}
+        state["_worker_request_failures"] = {}
         state["_next_worker_request_id"] = 0
         return state
 
@@ -102,6 +105,8 @@ class RpcHost:
         self._worker_condition = threading.Condition(threading.RLock())
         self._worker_responses = {}
         self._pending_worker_request_ids = set()
+        self._pending_worker_messengers = {}
+        self._worker_request_failures = {}
         self._next_worker_request_id = 0
 
     @property
@@ -115,6 +120,7 @@ class RpcHost:
         stop: threading.Event,
         *,
         max_request_bytes: int | Callable[[], int],
+        max_file_bytes: int | Callable[[], int],
         on_oversized_request: Callable[[], None],
         on_messenger_ready: Callable[[Messenger], None] | None = None,
         event_loop: asyncio.AbstractEventLoop | None = None,
@@ -125,6 +131,7 @@ class RpcHost:
             read_paths=request_files,
             write_paths=response_files,
             max_frame_bytes=max_request_bytes,
+            max_file_bytes=max_file_bytes,
             poll_interval=poll_interval,
             stop=stop,
         )
@@ -189,7 +196,7 @@ class RpcHost:
         handler_cancel_grace: float | None = None,
     ) -> None:
         message = messenger.receive_message()
-        if self.accept_worker_response(message):
+        if self.accept_worker_response(messenger, message):
             return
 
         response = self.response_for_message(
@@ -202,7 +209,11 @@ class RpcHost:
             with self._send_lock:
                 messenger.post_message(response)
 
-    def accept_worker_response(self, message: object) -> bool:
+    def accept_worker_response(
+        self,
+        messenger: Messenger,
+        message: object,
+    ) -> bool:
         if not isinstance(message, dict):
             return False
 
@@ -214,7 +225,7 @@ class RpcHost:
             return True
 
         with self._worker_condition:
-            if request_id not in self._pending_worker_request_ids:
+            if self._pending_worker_messengers.get(request_id) is not messenger:
                 return True
 
             self._worker_responses[request_id] = message
@@ -231,7 +242,7 @@ class RpcHost:
         *,
         timeout: float | None = None,
     ) -> Any:
-        request_id = self.next_worker_request_id()
+        request_id = self.next_worker_request_id(messenger)
         try:
             with self._send_lock:
                 messenger.post_message(
@@ -253,17 +264,37 @@ class RpcHost:
 
         raise RuntimeError(str(response.get("error")))
 
-    def next_worker_request_id(self) -> int:
+    def next_worker_request_id(self, messenger: Messenger) -> int:
         with self._worker_condition:
             request_id = self._next_worker_request_id
             self._next_worker_request_id += 1
             self._pending_worker_request_ids.add(request_id)
+            self._pending_worker_messengers[request_id] = messenger
             return request_id
 
     def discard_worker_request(self, request_id: int) -> None:
         with self._worker_condition:
             self._pending_worker_request_ids.discard(request_id)
+            self._pending_worker_messengers.pop(request_id, None)
             self._worker_responses.pop(request_id, None)
+            self._worker_request_failures.pop(request_id, None)
+
+    def close_worker(self, messenger: Messenger) -> None:
+        with self._worker_condition:
+            for request_id, pending_messenger in tuple(
+                self._pending_worker_messengers.items()
+            ):
+                if pending_messenger is not messenger:
+                    continue
+
+                self._pending_worker_request_ids.discard(request_id)
+                self._pending_worker_messengers.pop(request_id, None)
+                self._worker_responses.pop(request_id, None)
+                self._worker_request_failures[request_id] = RuntimeError(
+                    "worker stopped before responding"
+                )
+
+            self._worker_condition.notify_all()
 
     def wait_worker_response(
         self,
@@ -274,21 +305,29 @@ class RpcHost:
         deadline = None if timeout is None else time.monotonic() + timeout
 
         with self._worker_condition:
-            while request_id not in self._worker_responses:
+            while True:
+                failure = self._worker_request_failures.pop(request_id, None)
+                if failure is not None:
+                    raise failure
+
+                if request_id in self._worker_responses:
+                    self._pending_worker_request_ids.discard(request_id)
+                    self._pending_worker_messengers.pop(request_id, None)
+                    return self._worker_responses.pop(request_id)
+
+                if request_id not in self._pending_worker_request_ids:
+                    raise RuntimeError("worker request was discarded")
+
                 if deadline is None:
                     self._worker_condition.wait()
                     continue
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    self._pending_worker_request_ids.discard(request_id)
-                    self._worker_responses.pop(request_id, None)
+                    self.discard_worker_request(request_id)
                     raise TimeoutError("worker call timed out")
 
                 self._worker_condition.wait(remaining)
-
-            self._pending_worker_request_ids.discard(request_id)
-            return self._worker_responses.pop(request_id)
 
     def response_for_message(
         self,
@@ -344,7 +383,6 @@ class RpcHost:
                 request_id,
                 str(exc),
                 error_type=type(exc).__name__,
-                traceback_text=traceback.format_exc(),
             )
 
         return self.result_response(request_id, result)
@@ -426,23 +464,18 @@ class RpcHost:
         message: str,
         *,
         error_type: str = "RpcHostError",
-        traceback_text: str | None = None,
     ) -> dict[str, Any]:
         error: dict[str, Any] = {
             "type": error_type,
             "message": message,
         }
 
-        response: dict[str, Any] = {
+        return {
             "type": "response",
             "id": request_id,
             "ok": False,
             "error": error,
         }
-        if traceback_text is not None:
-            response["traceback"] = traceback_text
-
-        return response
 
 
 def rpc_handler_name(handler: RpcHandler) -> str:

@@ -10,6 +10,7 @@ from .messenger import (
 from .transports import (
     FileTransport,
     FileTransportError,
+    FileTransportFileTooLargeError,
     FileTransportFrameTooLargeError,
     FileTransportStoppedError,
 )
@@ -18,6 +19,7 @@ from .transports import (
 __all__ = [
     "FileTransport",
     "FileTransportError",
+    "FileTransportFileTooLargeError",
     "FileTransportFrameTooLargeError",
     "FileTransportStoppedError",
     "Message",
