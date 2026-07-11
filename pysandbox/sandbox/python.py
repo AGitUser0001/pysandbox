@@ -270,6 +270,7 @@ class PythonRuntime(Runtime):
             tag=re.compile(r"5\.\d+\.\d+"),
             source=True,
             extract=True,
+            extract_subdir="cbor2",
             user_agent="pysandbox-python-runtime",
             timeout=120,
         )
@@ -284,6 +285,10 @@ class PythonRuntime(Runtime):
     @property
     def runtime_root(self) -> Path:
         return self.root / "runtime"
+
+    @property
+    def cbor2_root(self) -> Path:
+        return self.root / "cbor2"
 
     def generate_runtime_parameters(
         self,
@@ -303,12 +308,36 @@ class PythonRuntime(Runtime):
         ]
 
         if message_pipe is not None:
+            guest_site_packages = (
+                f"/lib/python{install.python_version}/site-packages"
+            )
             env.update(
                 {
                     "PYSANDBOX_RPC_DIR": message_pipe.guest_dir,
                     "PYSANDBOX_RPC_METHODS": ",".join(self.rpc_methods()),
                     "PYSANDBOX_RPC_FILE_BYTES": str(limits.max_rpc_file_bytes),
                 }
+            )
+            mounts.append(
+                RuntimeMount(
+                    host=PACKAGE_ROOT / "messaging",
+                    guest=f"{guest_site_packages}/messaging",
+                    readonly=True,
+                )
+            )
+            mounts.append(
+                RuntimeMount(
+                    host=PACKAGE_ROOT / "guest_api_shim",
+                    guest=f"{guest_site_packages}/api",
+                    readonly=True,
+                )
+            )
+            mounts.append(
+                RuntimeMount(
+                    host=self.cbor2_root,
+                    guest=f"{guest_site_packages}/cbor2",
+                    readonly=True,
+                )
             )
             mounts.append(
                 RuntimeMount(
@@ -573,151 +602,52 @@ class PythonRuntime(Runtime):
         self._active_rpc_lock = threading.RLock()
 
     def ensure_runtime(self) -> PythonWasiInstall:
+        runtime_changed = self.runtime_asset.fetch(self.runtime_root)
         existing = self.inspect_runtime()
         if existing is None:
-            self.runtime_asset.fetch(self.runtime_root)
+            raise RuntimeError(
+                f"downloaded CPython WASI runtime is invalid at {self.runtime_root}"
+            )
 
-            existing = self.inspect_runtime()
-            if existing is None:
-                raise RuntimeError(
-                    f"downloaded CPython WASI runtime is invalid at {self.runtime_root}"
+        if runtime_changed:
+            self.compile_guest_python_files(existing, guest_tree="/lib")
+
+        if self.api:
+            if self.cbor2_asset.fetch(self.cbor2_root):
+                guest_cbor2_path = (
+                    f"/lib/python{existing.python_version}/site-packages/cbor2"
+                )
+                self.compile_guest_python_files(
+                    existing,
+                    guest_tree=guest_cbor2_path,
+                    mounts=[
+                        RuntimeMount(
+                            host=self.cbor2_root,
+                            guest=guest_cbor2_path,
+                            readonly=False,
+                            file_readonly=False,
+                        ),
+                    ],
                 )
 
-        self.ensure_guest_packages(existing)
-
         return existing
-
-    def ensure_guest_packages(self, install: PythonWasiInstall) -> None:
-        site_packages = self.site_packages(install)
-        bytecode_marker = site_packages / ".pysandbox-bytecode"
-        changed_files: list[Path] = []
-        if not (site_packages / "cbor2" / "__init__.py").is_file():
-            source_root = site_packages / ".cbor2-source"
-            self.cbor2_asset.fetch(source_root)
-            changed_files.extend(
-                self.install_cbor2_package(source_root, site_packages / "cbor2")
-            )
-        elif not bytecode_marker.is_file():
-            changed_files.extend(sorted((site_packages / "cbor2").rglob("*.py")))
-        else:
-            changed_files.extend(
-                python_files_needing_bytecode(site_packages / "cbor2")
-            )
-
-        changed_files.extend(self.copy_guest_messaging(site_packages))
-        if not bytecode_marker.is_file():
-            changed_files.extend(self.guest_messaging_files(site_packages))
-
-        self.compile_guest_python_files(install, bytecode_marker, changed_files)
-
-    @staticmethod
-    def site_packages(install: PythonWasiInstall) -> Path:
-        return (
-            install.runtime_root
-            / "lib"
-            / f"python{install.python_version}"
-            / "site-packages"
-        )
-
-    def install_cbor2_package(
-        self,
-        source_root: Path,
-        destination: Path,
-    ) -> list[Path]:
-        source = source_root / "cbor2"
-        if not (source / "__init__.py").is_file():
-            shutil.rmtree(source_root)
-            raise RuntimeError("downloaded cbor2 source does not contain /cbor2")
-
-        if destination.exists():
-            shutil.rmtree(destination)
-
-        shutil.copytree(source, destination)
-        shutil.rmtree(source_root)
-        return sorted(destination.rglob("*.py"))
-
-    def copy_guest_messaging(self, site_packages: Path) -> list[Path]:
-        site_packages.mkdir(parents=True, exist_ok=True)
-        messaging_package = site_packages / "messaging"
-        messaging_package.mkdir(parents=True, exist_ok=True)
-        changed_files: list[Path] = []
-        stale_messaging_file = messaging_package / ("messa" + "nger.py")
-        if stale_messaging_file.exists():
-            stale_messaging_file.unlink()
-
-        if write_text_if_changed(messaging_package / "__init__.py", ""):
-            changed_files.append(messaging_package / "__init__.py")
-        elif python_file_needs_bytecode(messaging_package / "__init__.py"):
-            changed_files.append(messaging_package / "__init__.py")
-
-        if copy_file_if_changed(
-            PACKAGE_ROOT / "messaging" / "messenger.py",
-            messaging_package / "messenger.py",
-        ):
-            changed_files.append(messaging_package / "messenger.py")
-        elif python_file_needs_bytecode(messaging_package / "messenger.py"):
-            changed_files.append(messaging_package / "messenger.py")
-
-        if copy_file_if_changed(
-            PACKAGE_ROOT / "messaging" / "transports.py",
-            messaging_package / "transports.py",
-        ):
-            changed_files.append(messaging_package / "transports.py")
-        elif python_file_needs_bytecode(messaging_package / "transports.py"):
-            changed_files.append(messaging_package / "transports.py")
-
-        if copy_file_if_changed(
-            PACKAGE_ROOT / "messaging" / "api.py",
-            messaging_package / "api.py",
-        ):
-            changed_files.append(messaging_package / "api.py")
-        elif python_file_needs_bytecode(messaging_package / "api.py"):
-            changed_files.append(messaging_package / "api.py")
-
-        if write_text_if_changed(
-            site_packages / "api.py",
-            "from messaging.api import *\n",
-        ):
-            changed_files.append(site_packages / "api.py")
-        elif python_file_needs_bytecode(site_packages / "api.py"):
-            changed_files.append(site_packages / "api.py")
-
-        return changed_files
-
-    def guest_messaging_files(self, site_packages: Path) -> list[Path]:
-        return [
-            site_packages / "api.py",
-            site_packages / "messaging" / "__init__.py",
-            site_packages / "messaging" / "api.py",
-            site_packages / "messaging" / "messenger.py",
-            site_packages / "messaging" / "transports.py",
-        ]
 
     def compile_guest_python_files(
         self,
         install: PythonWasiInstall,
-        marker: Path,
-        paths: list[Path],
+        *,
+        guest_tree: str,
+        mounts: list[RuntimeMount] | None = None,
     ) -> None:
-        unique_paths = sorted(
-            path
-            for path in set(paths)
-            if path.is_file()
-        )
-        if not unique_paths and marker.is_file():
-            return
-
-        guest_paths = [
-            self.guest_runtime_path(install, path)
-            for path in unique_paths
-        ]
-        marker_path = self.guest_runtime_path(install, marker)
         script = (
-            "import pathlib, py_compile\n"
-            f"paths = {guest_paths!r}\n"
-            "for path in paths:\n"
-            "    py_compile.compile(path, doraise=True)\n"
-            f"pathlib.Path({marker_path!r}).write_text('ok\\n', encoding='utf-8')\n"
+            "import compileall, sys\n"
+            f"sys.exit(not compileall.compile_dir({guest_tree!r}, quiet=1))\n"
+        )
+        runtime_mount = RuntimeMount(
+            host=install.runtime_root,
+            guest="/",
+            readonly=False,
+            file_readonly=False,
         )
         parent_output_connection, child_output_connection = self.create_worker_pipe()
         child_control_connection, parent_control_connection = self.create_worker_pipe()
@@ -727,14 +657,7 @@ class PythonRuntime(Runtime):
                     wasm_path=install.python_wasm,
                     argv=("python.wasm", "-I"),
                     stdin=script.encode("utf-8"),
-                    mounts=[
-                        RuntimeMount(
-                            host=install.runtime_root,
-                            guest="/",
-                            readonly=False,
-                            file_readonly=False,
-                        ),
-                    ],
+                    mounts=[runtime_mount, *(mounts or [])],
                 ),
                 child_output_connection,
                 child_control_connection,
@@ -821,45 +744,3 @@ class PythonRuntime(Runtime):
         )
 
         return versions[-1] if versions else None
-
-    @staticmethod
-    def guest_runtime_path(install: PythonWasiInstall, path: Path) -> str:
-        relative = path.relative_to(install.runtime_root)
-        return "/" + relative.as_posix()
-
-
-def copy_file_if_changed(source: Path, destination: Path) -> bool:
-    data = source.read_bytes()
-    if destination.is_file() and destination.read_bytes() == data:
-        return False
-
-    destination.write_bytes(data)
-    return True
-
-
-def write_text_if_changed(destination: Path, text: str) -> bool:
-    data = text.encode("utf-8")
-    if destination.is_file() and destination.read_bytes() == data:
-        return False
-
-    destination.write_bytes(data)
-    return True
-
-
-def python_file_needs_bytecode(path: Path) -> bool:
-    if not path.is_file():
-        return False
-
-    cache_dir = path.parent / "__pycache__"
-    return not any(cache_dir.glob(f"{path.stem}.*.pyc"))
-
-
-def python_files_needing_bytecode(root: Path) -> list[Path]:
-    if not root.is_dir():
-        return []
-
-    return [
-        path
-        for path in sorted(root.rglob("*.py"))
-        if python_file_needs_bytecode(path)
-    ]

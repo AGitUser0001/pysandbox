@@ -73,15 +73,15 @@ print(
 
 ## Internals
 
-- The CPython WASI runtime is downloaded into `python-wasi/` on first use.
-- Guest helper files are copied into the WASI runtime only when changed.
-- Guest bytecode is compiled by the WASI interpreter itself for version compatibility.
+- Runtime assets are checked against their GitHub releases on setup; each extracted asset stores its selected release in `.release`.
+- The guest `api`, `messaging`, and `cbor2` packages are mounted directly at guest `site-packages`; `cbor2` is stored beside the runtime under `python-wasi/cbor2`.
+- After an asset update, the WASI interpreter compiles the runtime `lib` tree and the `cbor2` tree once.
 - Runtime files are mounted readonly for normal execution.
 - Each execution runs in a spawned `multiprocessing` worker.
 - Wasmtime loads `python.wasm`; WASI preopens the runtime at `/`.
 - stdin is fed from memory through the worker stdin pipe.
 - stdout and stderr are captured through Wasmtime custom stream callbacks.
 - RPC messages are CBOR packets framed by `messaging.Messenger`.
-- The guest receives a tiny `api.py` shim plus the `messaging` package in `/lib/.../site-packages`.
+- The guest receives the `api`, `messaging`, and `cbor2` packages in `/lib/.../site-packages`.
 - The RPC transport uses two rotating request files and two rotating response files under `/__pysandbox_rpc__`.
 - Request files are writable by the guest; response files and runtime files are readonly during normal execution.

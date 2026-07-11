@@ -81,9 +81,75 @@ class Asset:
         if not self.source and self.filename is None:
             raise ValueError("filename is required unless source=True")
 
-    def fetch(self, path: Path) -> Path:
+    def fetch(self, path: Path) -> bool:
         selected = self.find()
-        return self.download(selected, path)
+        if self.is_current(path, selected):
+            return False
+
+        destination = self.download(selected, path)
+        self.write_current_asset(destination, selected)
+        return True
+
+    def is_current(
+        self,
+        destination: Path,
+        release_asset: GitHubReleaseAsset,
+    ) -> bool:
+        if not destination.exists() and not destination.is_symlink():
+            return False
+
+        try:
+            with self.metadata_path(destination).open(encoding="utf-8") as file:
+                metadata = json.load(file)
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+
+        return metadata == self.asset_metadata(release_asset)
+
+    def write_current_asset(
+        self,
+        destination: Path,
+        release_asset: GitHubReleaseAsset,
+    ) -> None:
+        metadata_path = self.metadata_path(destination)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(
+            self.asset_metadata(release_asset),
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+
+        with tempfile.NamedTemporaryFile(
+            dir=metadata_path.parent,
+            prefix=f".{metadata_path.name}-",
+            delete=False,
+        ) as file:
+            temporary_path = Path(file.name)
+            file.write(data)
+
+        try:
+            os.replace(temporary_path, metadata_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def asset_metadata(
+        self,
+        release_asset: GitHubReleaseAsset,
+    ) -> dict[str, str | int | bool | None]:
+        return {
+            "repo": self.repo,
+            "source": self.source,
+            "name": release_asset.name,
+            "url": release_asset.url,
+            "digest": release_asset.digest,
+            "size": release_asset.size,
+        }
+
+    def metadata_path(self, destination: Path) -> Path:
+        if self.extract:
+            return destination / ".release"
+
+        return destination.parent / f".{destination.name}.release"
 
     def find(self) -> GitHubReleaseAsset:
         for release in self.fetch_releases():
