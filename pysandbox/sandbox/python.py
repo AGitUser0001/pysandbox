@@ -613,6 +613,7 @@ class PythonRuntime(Runtime):
             self.compile_guest_python_files(existing, guest_tree="/lib")
 
         if self.api:
+            self.ensure_guest_package_anchors(existing)
             if self.cbor2_asset.fetch(self.cbor2_root):
                 guest_cbor2_path = (
                     f"/lib/python{existing.python_version}/site-packages/cbor2"
@@ -631,6 +632,17 @@ class PythonRuntime(Runtime):
                 )
 
         return existing
+
+    @staticmethod
+    def ensure_guest_package_anchors(install: PythonWasiInstall) -> None:
+        site_packages = (
+            install.runtime_root
+            / "lib"
+            / f"python{install.python_version}"
+            / "site-packages"
+        )
+        for name in ("api", "messaging", "cbor2"):
+            (site_packages / name).mkdir(parents=True, exist_ok=True)
 
     def compile_guest_python_files(
         self,
