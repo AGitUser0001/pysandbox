@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cbor2>=6",
-    "wasmtime>=46.0.1",
+    "wasmtime>=47.0.1",
 ]
 
 [build-system]
