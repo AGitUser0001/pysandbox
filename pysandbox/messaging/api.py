@@ -1,6 +1,7 @@
 import keyword
 import os
 import builtins
+from collections import deque
 from collections.abc import Mapping
 from types import CellType, CodeType
 from typing import Any
@@ -43,6 +44,7 @@ class HostCallError(Exception):
 
 _messenger: Messenger | None = None
 _next_request_id = 0
+_pending_worker_calls: deque[object] = deque()
 __all__: list[str] = ["spin"]
 
 
@@ -100,6 +102,10 @@ def receive_response(messenger: Messenger, request_id: int) -> object:
         if not isinstance(message, dict):
             continue
 
+        if message.get("type") == "worker_call":
+            _pending_worker_calls.append(message)
+            continue
+
         if message.get("type") != "response":
             continue
 
@@ -116,10 +122,17 @@ def spin() -> None:
     messenger = get_messenger()
 
     while True:
-        message = messenger.receive_message()
+        message = next_worker_call(messenger)
         response = worker_response_for_message(message, namespace)
         if response is not None:
             messenger.post_message(response)
+
+
+def next_worker_call(messenger: Messenger) -> object:
+    if _pending_worker_calls:
+        return _pending_worker_calls.popleft()
+
+    return messenger.receive_message()
 
 
 def worker_response_for_message(
