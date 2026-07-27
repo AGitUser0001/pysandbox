@@ -18,6 +18,6 @@ system-interface = { version = "0.27", features = ["cap_std_impls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full", "sync"] }
 tracing = "0.1"
-wasmtime = { version = "46.0.1", features = ["component-model", "async"] }
+wasmtime = { version = "47.0.2", features = ["component-model", "async"] }
 wasmtime-wasi = "46.0.1"
 wasmtime-wasi-io = "46.0.1"
