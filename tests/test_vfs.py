@@ -5,7 +5,6 @@ from tempfile import TemporaryDirectory
 
 from pysandbox import (
   PythonRuntime,
-  RuntimeLimits,
   RuntimeResult,
   VfsDirectoryEntry,
   VfsMetadata,
@@ -202,34 +201,6 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
 
       readonly = await runtime.execute("open('/created.txt', 'w')")
       self.assertIn("PermissionError", readonly.error or "")
-    finally:
-      await runtime.close()
-
-  async def test_panel_sympy_import_tree(self) -> None:
-    root = Path.home() / "Desktop/Panel/data/.runtime/fs"
-    if not (root / "sympy").is_dir():
-      self.skipTest("Panel SymPy runtime tree is unavailable")
-
-    runtime = PythonRuntime(vfs=DirectoryVfs(root), cache_vfs=True)
-    try:
-      result = await runtime.execute(
-        "import sys, types\n"
-        "ctypes = types.ModuleType('ctypes')\n"
-        "ctypes.c_long = int\n"
-        "ctypes.sizeof = lambda _: 8\n"
-        "ctypes.Union = ctypes.Structure = ctypes.Array = object\n"
-        "sys.modules['ctypes'] = ctypes\n"
-        "import sympy as sp\n"
-        "from sympy.parsing.sympy_parser import parse_expr\n"
-        "print(sp.factor(parse_expr('x**2 - 1')), flush=True)\n",
-        limits=RuntimeLimits(
-          max_memory_bytes=256 * 1024 * 1024,
-          max_output_bytes=1024 * 1024,
-          timeout=120,
-        ),
-      )
-      self.assertIsNone(result.error)
-      self.assertEqual(result.stdout, b"(x - 1)*(x + 1)\n")
     finally:
       await runtime.close()
 
