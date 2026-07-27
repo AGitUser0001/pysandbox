@@ -76,6 +76,10 @@ options = WorkerCallOptions(
 print(await worker.call(("increment",), options, 2))
 ```
 
+`WorkerCallOptions.timeout` limits how long the caller waits. It does not
+cancel the guest operation, which may continue executing and producing side
+effects.
+
 ## Limits
 
 Limits belong to an execution:
@@ -142,12 +146,19 @@ are shared across workers until the host calls
 `await runtime.invalidate_vfs(path)`. Passing no path clears the whole cache.
 The guest cannot write to the VFS.
 
-`worker_queue_capacity` bounds pending executions for each worker. When a
-worker's queue is full, new executions fail immediately without blocking
-traffic for other workers:
+`worker_queue_capacity` bounds pending executions and user-level calls for
+each worker. When either queue is full, new work fails immediately without
+blocking traffic for other workers:
 
 ```python
 runtime = PythonRuntime(worker_queue_capacity=256)
+```
+
+`host_dispatch_concurrency` limits the combined number of guest RPC and VFS
+callbacks actively dispatched into the host Python application:
+
+```python
+runtime = PythonRuntime(host_dispatch_concurrency=64)
 ```
 
 ## Internals

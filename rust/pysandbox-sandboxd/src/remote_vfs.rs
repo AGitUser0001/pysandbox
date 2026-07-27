@@ -69,8 +69,10 @@ impl RemoteVfs {
         let path = normalize_path(path);
         let parent = parent_path(&path);
         cache.retain(|key, _| match key {
-            CacheKey::Stat(cached) | CacheKey::Read(cached) => cached != &path,
-            CacheKey::List(cached) => cached != &path && cached != &parent,
+            CacheKey::Stat(cached) | CacheKey::Read(cached) => {
+                !is_same_or_descendant(cached, &path)
+            }
+            CacheKey::List(cached) => !is_same_or_descendant(cached, &path) && cached != &parent,
         });
     }
 
@@ -107,6 +109,14 @@ impl RemoteVfs {
         }
         response_value(response)
     }
+}
+
+fn is_same_or_descendant(candidate: &str, path: &str) -> bool {
+    candidate == path
+        || path == "/"
+        || candidate
+            .strip_prefix(path)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[async_trait]

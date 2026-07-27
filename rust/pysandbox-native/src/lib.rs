@@ -21,7 +21,7 @@ use pysandbox_protocol::{
     read_frame, write_frame,
 };
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -371,6 +371,7 @@ impl SandboxProcess {
     executable_arguments = Vec::new(),
     max_ipc_frame_bytes = DEFAULT_MAX_FRAME_BYTES,
     worker_queue_capacity = 256,
+    host_dispatch_concurrency = 64,
     cache_vfs = false,
 ))]
 fn start_sandbox<'py>(
@@ -382,11 +383,17 @@ fn start_sandbox<'py>(
     executable_arguments: Vec<String>,
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
+    host_dispatch_concurrency: usize,
     cache_vfs: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if worker_queue_capacity == 0 {
         return Err(PyValueError::new_err(
             "worker_queue_capacity must be positive",
+        ));
+    }
+    if host_dispatch_concurrency == 0 {
+        return Err(PyValueError::new_err(
+            "host_dispatch_concurrency must be positive",
         ));
     }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -414,8 +421,19 @@ fn start_sandbox<'py>(
         );
         let rpc_handlers = Arc::new(StdMutex::new(HashMap::new()));
         let vfs_handler = Arc::new(StdMutex::new(None));
-        spawn_guest_call_dispatcher(guest_call_receiver, requests.clone(), rpc_handlers.clone());
-        spawn_vfs_dispatcher(vfs_request_receiver, requests.clone(), vfs_handler.clone());
+        let host_dispatch = Arc::new(Semaphore::new(host_dispatch_concurrency));
+        spawn_guest_call_dispatcher(
+            guest_call_receiver,
+            requests.clone(),
+            rpc_handlers.clone(),
+            host_dispatch.clone(),
+        );
+        spawn_vfs_dispatcher(
+            vfs_request_receiver,
+            requests.clone(),
+            vfs_handler.clone(),
+            host_dispatch,
+        );
 
         Python::attach(|py| {
             Py::new(
@@ -629,34 +647,43 @@ fn spawn_guest_call_dispatcher(
     mut guest_calls: mpsc::Receiver<Frame>,
     requests: mpsc::Sender<ConnectionRequest>,
     handlers: RpcHandlers,
+    host_dispatch: Arc<Semaphore>,
 ) {
     pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
         while let Some(frame) = guest_calls.recv().await {
-            let result = match decode_payload::<RpcCall>(&frame.payload) {
-                Ok(call) => invoke_rpc_handler(&handlers, call).await,
-                Err(error) => Err(error.to_string()),
+            let Ok(permit) = host_dispatch.clone().acquire_owned().await else {
+                return;
             };
-            let response = match result {
-                Ok(value) => RpcResult { value, error: None },
-                Err(error) => RpcResult {
-                    value: Vec::new(),
-                    error: Some(error),
-                },
-            };
-            let Ok(payload) = encode_payload(&response) else {
-                continue;
-            };
-            let _ = request(
-                &requests,
-                Frame::new(
-                    FrameKind::GuestResponse,
-                    frame.worker_id,
-                    frame.request_id,
-                    payload,
-                ),
-                None,
-            )
-            .await;
+            let requests = requests.clone();
+            let handlers = handlers.clone();
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                let _permit = permit;
+                let result = match decode_payload::<RpcCall>(&frame.payload) {
+                    Ok(call) => invoke_rpc_handler(&handlers, call).await,
+                    Err(error) => Err(error.to_string()),
+                };
+                let response = match result {
+                    Ok(value) => RpcResult { value, error: None },
+                    Err(error) => RpcResult {
+                        value: Vec::new(),
+                        error: Some(error),
+                    },
+                };
+                let Ok(payload) = encode_payload(&response) else {
+                    return;
+                };
+                let _ = request(
+                    &requests,
+                    Frame::new(
+                        FrameKind::GuestResponse,
+                        frame.worker_id,
+                        frame.request_id,
+                        payload,
+                    ),
+                    None,
+                )
+                .await;
+            });
         }
     });
 }
@@ -665,42 +692,51 @@ fn spawn_vfs_dispatcher(
     mut vfs_requests: mpsc::Receiver<Frame>,
     requests: mpsc::Sender<ConnectionRequest>,
     handler: VfsHandler,
+    host_dispatch: Arc<Semaphore>,
 ) {
     pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
         while let Some(frame) = vfs_requests.recv().await {
-            let response = match decode_payload::<VfsRequest>(&frame.payload) {
-                Ok(call) => match invoke_vfs_handler(&handler, call).await {
-                    Ok(value) => VfsResponse {
-                        value: Some(value),
-                        error: None,
+            let Ok(permit) = host_dispatch.clone().acquire_owned().await else {
+                return;
+            };
+            let requests = requests.clone();
+            let handler = handler.clone();
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                let _permit = permit;
+                let response = match decode_payload::<VfsRequest>(&frame.payload) {
+                    Ok(call) => match invoke_vfs_handler(&handler, call).await {
+                        Ok(value) => VfsResponse {
+                            value: Some(value),
+                            error: None,
+                        },
+                        Err(error) => VfsResponse {
+                            value: None,
+                            error: Some(error),
+                        },
                     },
                     Err(error) => VfsResponse {
                         value: None,
-                        error: Some(error),
+                        error: Some(VfsError {
+                            code: VfsErrorCode::Invalid,
+                            message: error.to_string(),
+                        }),
                     },
-                },
-                Err(error) => VfsResponse {
-                    value: None,
-                    error: Some(VfsError {
-                        code: VfsErrorCode::Invalid,
-                        message: error.to_string(),
-                    }),
-                },
-            };
-            let Ok(payload) = encode_payload(&response) else {
-                continue;
-            };
-            let _ = request(
-                &requests,
-                Frame::new(
-                    FrameKind::VfsResponse,
-                    frame.worker_id,
-                    frame.request_id,
-                    payload,
-                ),
-                None,
-            )
-            .await;
+                };
+                let Ok(payload) = encode_payload(&response) else {
+                    return;
+                };
+                let _ = request(
+                    &requests,
+                    Frame::new(
+                        FrameKind::VfsResponse,
+                        frame.worker_id,
+                        frame.request_id,
+                        payload,
+                    ),
+                    None,
+                )
+                .await;
+            });
         }
     });
 }

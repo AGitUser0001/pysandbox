@@ -220,13 +220,21 @@ pub struct ExecutionLimits {
 
 pub(crate) enum ControlMessage {
     ApplyUpdates,
-    WorkerCall {
-        request_id: u64,
-        path: Vec<String>,
-        arguments: Vec<u8>,
-        fuel: Option<FuelOperation>,
-    },
     Close,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkerCallMessage {
+    request_id: u64,
+    path: Vec<String>,
+    arguments: Vec<u8>,
+    fuel: Option<FuelOperation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkerCallEnqueueError {
+    Full,
+    Closed,
 }
 
 #[derive(Debug)]
@@ -263,20 +271,30 @@ struct ExecutionControlState {
 #[derive(Clone)]
 pub struct WorkerControl {
     sender: mpsc::UnboundedSender<ControlMessage>,
+    worker_calls: mpsc::Sender<WorkerCallMessage>,
     state: Arc<ExecutionControlState>,
     output: Output,
 }
 
 impl WorkerControl {
-    pub(crate) fn new() -> (Self, mpsc::UnboundedReceiver<ControlMessage>) {
+    pub(crate) fn new(
+        worker_queue_capacity: usize,
+    ) -> (
+        Self,
+        mpsc::UnboundedReceiver<ControlMessage>,
+        mpsc::Receiver<WorkerCallMessage>,
+    ) {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let (worker_calls, worker_call_receiver) = mpsc::channel(worker_queue_capacity);
         (
             Self {
                 sender,
+                worker_calls,
                 state: Arc::new(ExecutionControlState::default()),
                 output: Output::default(),
             },
             receiver,
+            worker_call_receiver,
         )
     }
 
@@ -382,19 +400,24 @@ impl WorkerControl {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    pub fn worker_call(
+    pub(crate) fn worker_call(
         &self,
         request_id: u64,
         path: Vec<String>,
         arguments: Vec<u8>,
         fuel: Option<FuelOperation>,
-    ) -> Result<()> {
-        self.send(ControlMessage::WorkerCall {
-            request_id,
-            path,
-            arguments,
-            fuel,
-        })
+    ) -> std::result::Result<(), WorkerCallEnqueueError> {
+        self.worker_calls
+            .try_send(WorkerCallMessage {
+                request_id,
+                path,
+                arguments,
+                fuel,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => WorkerCallEnqueueError::Full,
+                mpsc::error::TrySendError::Closed(_) => WorkerCallEnqueueError::Closed,
+            })
     }
 
     fn send(&self, message: ControlMessage) -> Result<()> {
@@ -496,6 +519,7 @@ struct ComponentState {
     vfs: HybridVfsCtx<RemoteVfs>,
     limits: StoreLimits,
     control_queue: Arc<AsyncMutex<mpsc::UnboundedReceiver<ControlMessage>>>,
+    worker_call_queue: Arc<AsyncMutex<mpsc::Receiver<WorkerCallMessage>>>,
     execution_control: Arc<ExecutionControlState>,
     rpc: RpcBridge,
     max_guest_rpc_bytes: usize,
@@ -618,41 +642,50 @@ impl pysandbox::python::host::HostWithStore<ComponentState> for HasSelf<Componen
     async fn spin_next(
         accessor: &Accessor<ComponentState, Self>,
     ) -> Option<pysandbox::python::host::SpinEvent> {
-        let (control_queue, execution_control) = accessor.with(|mut access| {
+        let (control_queue, worker_call_queue, execution_control) = accessor.with(|mut access| {
             let state = access.get();
-            (state.control_queue.clone(), state.execution_control.clone())
+            (
+                state.control_queue.clone(),
+                state.worker_call_queue.clone(),
+                state.execution_control.clone(),
+            )
         });
-        let message = control_queue.lock().await.recv().await?;
-        match message {
+        let mut control_queue = control_queue.lock().await;
+        let mut worker_call_queue = worker_call_queue.lock().await;
+        tokio::select! {
+          biased;
+          message = control_queue.recv() => match message? {
             ControlMessage::ApplyUpdates => {
                 accessor.with(|mut access| {
                     apply_pending_store_updates(access.as_context_mut(), &execution_control);
                 });
                 Some(pysandbox::python::host::SpinEvent { call: None })
             }
-            ControlMessage::WorkerCall {
+            ControlMessage::Close => None,
+          },
+          message = worker_call_queue.recv() => {
+            let WorkerCallMessage {
                 request_id,
                 path,
                 arguments,
                 fuel,
-            } => {
-                let fuel_result =
-                    accessor.with(|mut access| apply_call_fuel(access.as_context_mut(), fuel));
-                if let Err(error) = fuel_result {
-                    let rpc = accessor.with(|mut access| access.get().rpc.clone());
-                    rpc.worker_response(request_id, Vec::new(), Some(error))
-                        .await;
-                    return Some(pysandbox::python::host::SpinEvent { call: None });
-                }
-                Some(pysandbox::python::host::SpinEvent {
-                    call: Some(pysandbox::python::host::WorkerCall {
-                        request_id,
-                        path,
-                        arguments,
-                    }),
-                })
+            } = message?;
+            let fuel_result =
+                accessor.with(|mut access| apply_call_fuel(access.as_context_mut(), fuel));
+            if let Err(error) = fuel_result {
+                let rpc = accessor.with(|mut access| access.get().rpc.clone());
+                rpc.worker_response(request_id, Vec::new(), Some(error))
+                    .await;
+                return Some(pysandbox::python::host::SpinEvent { call: None });
             }
-            ControlMessage::Close => None,
+            Some(pysandbox::python::host::SpinEvent {
+                call: Some(pysandbox::python::host::WorkerCall {
+                    request_id,
+                    path,
+                    arguments,
+                }),
+            })
+          },
         }
     }
 
@@ -764,6 +797,7 @@ impl ComponentWorker {
         rpc: RpcBridge,
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
+        worker_call_receiver: mpsc::Receiver<WorkerCallMessage>,
     ) -> Result<Self> {
         Self::load_with_python_permissions(
             runtime,
@@ -771,6 +805,7 @@ impl ComponentWorker {
             rpc,
             control,
             control_receiver,
+            worker_call_receiver,
             DirPerms::READ,
             FilePerms::READ,
         )
@@ -783,6 +818,7 @@ impl ComponentWorker {
         rpc: RpcBridge,
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
+        worker_call_receiver: mpsc::Receiver<WorkerCallMessage>,
         python_dir_perms: DirPerms,
         python_file_perms: FilePerms,
     ) -> Result<Self> {
@@ -811,6 +847,7 @@ impl ComponentWorker {
                 vfs,
                 limits: StoreLimitsBuilder::new().build(),
                 control_queue: Arc::new(AsyncMutex::new(control_receiver)),
+                worker_call_queue: Arc::new(AsyncMutex::new(worker_call_receiver)),
                 execution_control: control.state.clone(),
                 rpc,
                 max_guest_rpc_bytes: 10 * 1024 * 1024,
@@ -943,7 +980,7 @@ async fn run_build_program(
         crate::remote_vfs::CachePolicy::None,
     );
     let runtime = ComponentRuntime::load_with_filesystem(component_path, vfs, false)?;
-    let (control, control_receiver) = WorkerControl::new();
+    let (control, control_receiver, worker_call_receiver) = WorkerControl::new(1);
     let rpc = RpcBridge::new(0, outgoing, next_request_id, pending_guest_calls);
     let mut worker = ComponentWorker::load_with_python_permissions(
         &runtime,
@@ -951,6 +988,7 @@ async fn run_build_program(
         rpc,
         control,
         control_receiver,
+        worker_call_receiver,
         DirPerms::all(),
         FilePerms::all(),
     )

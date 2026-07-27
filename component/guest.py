@@ -2,6 +2,7 @@ import ast
 import inspect
 import sys
 import traceback
+import types
 
 import cbor2
 import wit_world
@@ -37,15 +38,21 @@ async def call(method: str, *args: object, **kwargs: object) -> object:
 
 class WitWorld(wit_world.WitWorld):
   def __init__(self) -> None:
-    self.namespace: dict[str, object] = {
-      "__name__": "__main__",
-      "cbor2": cbor2,
-      "call": call,
-      "spin": lambda: spin(self.namespace),
-    }
+    self.main_module = types.ModuleType("__main__")
+    self.namespace: dict[str, object] = self.main_module.__dict__
+    self.namespace.update(
+      {
+        "cbor2": cbor2,
+        "call": call,
+        "spin": lambda: spin(self.namespace),
+      }
+    )
+    sys.modules["__main__"] = self.main_module
 
   async def run(self) -> None:
     try:
+      if "/" not in sys.path:
+        sys.path.insert(0, "/")
       program = host.program()
       code = compile(
         program,

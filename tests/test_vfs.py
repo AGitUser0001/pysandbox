@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from pysandbox import (
   PythonRuntime,
@@ -82,7 +83,6 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     try:
       result = await runtime.execute(
         "import sys\n"
-        "sys.path.insert(0, '/')\n"
         "import hello\n"
         "print(hello.value, sys.dont_write_bytecode, flush=True)\n",
       )
@@ -91,10 +91,7 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
 
       initial_reads = vfs.calls.count(("read", "/hello.py"))
       second = await runtime.execute(
-        "import sys\n"
-        "sys.path.insert(0, '/')\n"
-        "import hello\n"
-        "print(hello.value, flush=True)\n",
+        "import sys\nimport hello\nprint(hello.value, flush=True)\n",
       )
       self.assertIsNone(second.error)
       self.assertEqual(vfs.calls.count(("read", "/hello.py")), initial_reads)
@@ -103,10 +100,7 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
       vfs.files["/hello.py"] = b"value = 84\n"
       await runtime.invalidate_vfs("/hello.py")
       third = await runtime.execute(
-        "import sys\n"
-        "sys.path.insert(0, '/')\n"
-        "import hello\n"
-        "print(hello.value, flush=True)\n",
+        "import sys\nimport hello\nprint(hello.value, flush=True)\n",
       )
       self.assertIsNone(third.error)
       self.assertEqual(third.stdout, b"84\n")
@@ -126,7 +120,6 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     try:
       result = await runtime.execute(
         "import sys, types\n"
-        "sys.path.insert(0, '/')\n"
         "ctypes = types.ModuleType('ctypes')\n"
         "ctypes.c_long = int\n"
         "ctypes.sizeof = lambda _: 8\n"
@@ -145,6 +138,42 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(result.stdout, b"(x - 1)*(x + 1)\n")
     finally:
       await runtime.close()
+
+  async def test_directory_invalidation_evicts_descendants(self) -> None:
+    with TemporaryDirectory() as directory:
+      root = Path(directory)
+      package = root / "package"
+      package.mkdir()
+      (package / "__init__.py").write_text(
+        "from .value import value\n",
+        encoding="utf-8",
+      )
+      value_file = package / "value.py"
+      value_file.write_text("value = 1\n", encoding="utf-8")
+
+      runtime = PythonRuntime(vfs=DirectoryVfs(root), cache_vfs=True)
+      try:
+        first = await runtime.execute(
+          "import package\nprint(package.value, flush=True)",
+        )
+        self.assertIsNone(first.error)
+        self.assertEqual(first.stdout, b"1\n")
+
+        value_file.write_text("value = 2\n", encoding="utf-8")
+        cached = await runtime.execute(
+          "import package\nprint(package.value, flush=True)",
+        )
+        self.assertIsNone(cached.error)
+        self.assertEqual(cached.stdout, b"1\n")
+
+        await runtime.invalidate_vfs("/package")
+        refreshed = await runtime.execute(
+          "import package\nprint(package.value, flush=True)",
+        )
+        self.assertIsNone(refreshed.error)
+        self.assertEqual(refreshed.stdout, b"2\n")
+      finally:
+        await runtime.close()
 
 
 if __name__ == "__main__":

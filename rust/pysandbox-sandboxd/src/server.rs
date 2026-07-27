@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::component_worker::{
     ComponentRuntime, ComponentWorker, ExecutionLimits, OutputEvent, OutputSource,
-    PendingGuestCalls, RpcBridge,
+    PendingGuestCalls, RpcBridge, WorkerCallEnqueueError,
 };
 use crate::remote_vfs::{CachePolicy, PendingVfsRequests, RemoteVfs};
 
@@ -246,21 +246,27 @@ async fn serve_connection(
                 }
             }
             FrameKind::WorkerCall => {
-                let result = decode_payload::<WorkerRpcCall>(&frame.payload)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|call| {
-                        workers
-                            .get(&frame.worker_id)
-                            .ok_or_else(|| anyhow::anyhow!("worker does not exist"))?
+                let error = match decode_payload::<WorkerRpcCall>(&frame.payload) {
+                    Err(error) => Some(error.to_string()),
+                    Ok(call) => match workers.get(&frame.worker_id) {
+                        None => Some("worker does not exist".into()),
+                        Some(worker) => worker
                             .control
                             .worker_call(frame.request_id, call.path, call.arguments, call.fuel)
-                    });
-                if let Err(error) = result {
-                    send_error(
+                            .err()
+                            .map(|error| match error {
+                                WorkerCallEnqueueError::Full => "worker call queue is full".into(),
+                                WorkerCallEnqueueError::Closed => "worker actor stopped".into(),
+                            }),
+                    },
+                };
+                if let Some(error) = error {
+                    send_worker_response(
                         &outgoing,
                         frame.worker_id,
                         frame.request_id,
-                        error.to_string(),
+                        Vec::new(),
+                        Some(error),
                     )
                     .await?;
                 }
@@ -311,7 +317,8 @@ fn spawn_worker(
     worker_queue_capacity: usize,
 ) -> WorkerHandle {
     let (commands, mut command_receiver) = mpsc::channel(worker_queue_capacity);
-    let (control, control_receiver) = crate::component_worker::WorkerControl::new();
+    let (control, control_receiver, worker_call_receiver) =
+        crate::component_worker::WorkerControl::new(worker_queue_capacity);
     let actor_control = control.clone();
     let rpc = RpcBridge::new(
         worker_id,
@@ -326,6 +333,7 @@ fn spawn_worker(
             rpc,
             actor_control,
             control_receiver,
+            worker_call_receiver,
         )
         .await
         {
@@ -519,6 +527,24 @@ async fn send_execute_result(
             worker_id,
             request_id,
             encode_payload(&ExecuteResult { error, reason })?,
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn send_worker_response(
+    outgoing: &mpsc::Sender<Frame>,
+    worker_id: u64,
+    request_id: u64,
+    value: Vec<u8>,
+    error: Option<String>,
+) -> anyhow::Result<()> {
+    outgoing
+        .send(Frame::new(
+            FrameKind::WorkerResponse,
+            worker_id,
+            request_id,
+            encode_payload(&RpcResult { value, error })?,
         ))
         .await?;
     Ok(())
