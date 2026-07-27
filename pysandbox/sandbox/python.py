@@ -8,13 +8,11 @@ import threading
 from dataclasses import dataclass, field
 from multiprocessing.context import SpawnProcess
 from pathlib import Path
-from typing import Any
 
 from ..messaging import Messenger
 from .assets import Asset
 from .rpc_host import RpcHost
 from .runtime import (
-    decode_output_event,
     Runtime,
     RuntimeError,
     RuntimeExecutionError,
@@ -22,20 +20,20 @@ from .runtime import (
     RuntimeMount,
     RuntimeParameters,
     RuntimeResult,
+    RuntimeSetupError,
     RuntimeStartCallback,
     RuntimeWorkerStartCallback,
-    RuntimeSetupError,
     WasmtimeEnvironment,
     Worker,
+    decode_output_event,
 )
-
 
 __all__ = [
     "PythonMessagePipe",
     "PythonRuntime",
     "PythonRuntimeParameters",
-    "PythonWorker",
     "PythonWasiInstall",
+    "PythonWorker",
 ]
 
 

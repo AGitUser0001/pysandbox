@@ -1,0 +1,12 @@
+[package]
+name = "pysandbox-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_cbor.workspace = true
+thiserror.workspace = true

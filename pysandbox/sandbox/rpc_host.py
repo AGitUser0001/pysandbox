@@ -16,7 +16,6 @@ import cbor2
 
 from ..messaging import FileTransport, FileTransportError, Messenger, MessengerError
 
-
 __all__ = [
     "RpcHandler",
     "RpcHandlerCancelled",

@@ -10,10 +10,30 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.10,<2"]
+build-backend = "maturin"
+
+[dependency-groups]
+dev = [
+    "componentize-py",
+]
+
+[tool.maturin]
+manifest-path = "rust/pysandbox-native/Cargo.toml"
+module-name = "pysandbox._core"
+python-source = "."
 
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
+
+[tool.ruff]
+indent-width = 2
+
+[tool.ruff.format]
+quote-style = "preserve"
+
+[tool.ruff.lint]
+extend-select = ["I", "RUF022"]
+ignore = ["B010", "BLE001"]

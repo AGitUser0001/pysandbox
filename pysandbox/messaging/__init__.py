@@ -15,7 +15,6 @@ from .transports import (
     FileTransportStoppedError,
 )
 
-
 __all__ = [
     "FileTransport",
     "FileTransportError",

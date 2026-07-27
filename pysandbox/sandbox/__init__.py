@@ -20,14 +20,13 @@ from .runtime import (
     Worker,
 )
 
-
 __all__ = [
     "Asset",
     "AssetDigestError",
     "AssetError",
     "AssetNotFoundError",
-    "OutputEvent",
     "Output",
+    "OutputEvent",
     "PythonRuntime",
     "RpcHandler",
     "RpcHandlerCancelled",

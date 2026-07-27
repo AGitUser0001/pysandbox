@@ -16,7 +16,6 @@ from typing import Any, Protocol
 
 from pysandbox import PythonRuntime, RuntimeLimits
 
-
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
 CYAN = "\x1b[36m"

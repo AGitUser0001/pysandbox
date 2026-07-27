@@ -1,10 +1,9 @@
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
 import cbor2
-
 
 __all__ = [
     "Message",
