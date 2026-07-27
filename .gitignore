@@ -247,3 +247,6 @@ rustc-ice-*.txt
 
 .DS_Store
 python-wasi/
+component/pysandbox.wasm
+pysandbox/_runtime/
+tmp/

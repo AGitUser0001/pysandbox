@@ -1,0 +1,3 @@
+[submodule "vendor/cbor2"]
+	path = vendor/cbor2
+	url = https://github.com/agronholm/cbor2.git

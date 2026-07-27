@@ -1,6 +1,28 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
+use interprocess::local_socket::{
+    GenericFilePath, GenericNamespaced, ToFsName, ToNsName,
+    tokio::{Stream, prelude::*},
+};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyTuple};
+use pysandbox_protocol::{
+    CancelRequest, ControlResult, DEFAULT_MAX_FRAME_BYTES, ExecuteRequest, ExecutionControl,
+    ExecutionLimits, Frame, FrameKind, FuelOperation, OutputPayload, OutputSource, RpcCall,
+    RpcResult, WorkerRpcCall, decode_payload, encode_payload, read_frame, write_frame,
+};
+use tokio::process::{Child, Command};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
+
+const START_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 #[pyfunction]
 fn protocol_version() -> u16 {
@@ -15,9 +37,965 @@ fn sleep<'py>(py: Python<'py>, milliseconds: u64) -> PyResult<Bound<'py, PyAny>>
     })
 }
 
+#[pyfunction]
+fn run_sandboxd(
+    py: Python<'_>,
+    socket_name: String,
+    component_path: PathBuf,
+    python_root: PathBuf,
+    max_ipc_frame_bytes: usize,
+) -> PyResult<()> {
+    py.detach(move || {
+        let runtime = tokio::runtime::Runtime::new().map_err(runtime_error)?;
+        runtime
+            .block_on(pysandbox_sandboxd::server::serve(
+                &socket_name,
+                &component_path,
+                &python_root,
+                max_ipc_frame_bytes,
+            ))
+            .map_err(runtime_error)
+    })
+}
+
+#[pyclass]
+struct SandboxProcess {
+    requests: mpsc::Sender<ConnectionRequest>,
+    child: Arc<Mutex<Option<Child>>>,
+    next_request_id: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+    rpc_handlers: RpcHandlers,
+}
+
+type RpcHandlers = Arc<StdMutex<HashMap<String, RpcHandler>>>;
+
+struct RpcHandler {
+    callable: Py<PyAny>,
+    locals: pyo3_async_runtimes::TaskLocals,
+}
+
+#[pymethods]
+impl SandboxProcess {
+    fn expose(&self, py: Python<'_>, method: String, handler: Py<PyAny>) -> PyResult<()> {
+        if !handler.bind(py).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "RPC handler must be callable",
+            ));
+        }
+        let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
+        self.rpc_handlers
+            .lock()
+            .expect("RPC handler lock poisoned")
+            .insert(
+                method,
+                RpcHandler {
+                    callable: handler,
+                    locals,
+                },
+            );
+        Ok(())
+    }
+
+    fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let requests = self.requests.clone();
+        let closed = self.closed.clone();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if closed.load(Ordering::Acquire) {
+                return Err(PyRuntimeError::new_err("sandbox process is closed"));
+            }
+
+            let _ = request(
+                &requests,
+                Frame::new(FrameKind::HealthCheck, 0, request_id, Vec::new()),
+                Some(FrameKind::HealthStatus),
+            )
+            .await?;
+
+            Python::attach(|py| Ok(py.None()))
+        })
+    }
+
+    #[pyo3(signature = (
+        program,
+        *,
+        worker_id = 0,
+        max_memory_bytes = 128 * 1024 * 1024,
+        max_output_bytes = 256 * 1024,
+        max_guest_rpc_bytes = 10 * 1024 * 1024,
+        fuel = u64::MAX,
+        timeout = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &self,
+        py: Python<'_>,
+        program: String,
+        worker_id: u64,
+        max_memory_bytes: u64,
+        max_output_bytes: u64,
+        max_guest_rpc_bytes: u64,
+        fuel: u64,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<NativeExecution>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err("sandbox process is closed"));
+        }
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let output = Arc::new(StdMutex::new(Vec::new()));
+        let (result_sender, result) = watch::channel(None);
+        let requests = self.requests.clone();
+        let timeout_ms = timeout_milliseconds(timeout)?;
+        let payload = encode_payload(&ExecuteRequest {
+            program,
+            limits: ExecutionLimits {
+                max_memory_bytes,
+                max_output_bytes,
+                max_guest_rpc_bytes,
+                fuel,
+                timeout_ms,
+            },
+        })
+        .map_err(runtime_error)?;
+        let task_output = output.clone();
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            let outcome = execute_request(&requests, worker_id, request_id, payload, task_output)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = result_sender.send(Some(outcome));
+        });
+
+        Py::new(
+            py,
+            NativeExecution {
+                worker_id,
+                execution_id: request_id,
+                requests: self.requests.clone(),
+                next_request_id: self.next_request_id.clone(),
+                output,
+                result,
+            },
+        )
+    }
+
+    #[pyo3(signature = (
+        program,
+        *,
+        worker_id = 0,
+        max_memory_bytes = 128 * 1024 * 1024,
+        max_output_bytes = 256 * 1024,
+        max_guest_rpc_bytes = 10 * 1024 * 1024,
+        fuel = u64::MAX,
+        timeout = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        program: String,
+        worker_id: u64,
+        max_memory_bytes: u64,
+        max_output_bytes: u64,
+        max_guest_rpc_bytes: u64,
+        fuel: u64,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let requests = self.requests.clone();
+        let closed = self.closed.clone();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let timeout_ms = timeout_milliseconds(timeout)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if closed.load(Ordering::Acquire) {
+                return Err(PyRuntimeError::new_err("sandbox process is closed"));
+            }
+
+            let payload = encode_payload(&ExecuteRequest {
+                program,
+                limits: ExecutionLimits {
+                    max_memory_bytes,
+                    max_output_bytes,
+                    max_guest_rpc_bytes,
+                    fuel,
+                    timeout_ms,
+                },
+            })
+            .map_err(runtime_error)?;
+            let output = Arc::new(StdMutex::new(Vec::new()));
+            let result =
+                execute_request(&requests, worker_id, request_id, payload, output.clone()).await?;
+
+            Python::attach(|py| {
+                Py::new(
+                    py,
+                    NativeExecutionResult {
+                        error: result.error,
+                        output: output_snapshot(&output),
+                    },
+                )
+            })
+        })
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let requests = self.requests.clone();
+        let child = self.child.clone();
+        let closed = self.closed.clone();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if !closed.swap(true, Ordering::AcqRel) {
+                request(
+                    &requests,
+                    Frame::new(FrameKind::Shutdown, 0, request_id, Vec::new()),
+                    None,
+                )
+                .await?;
+            }
+
+            let Some(mut child) = child.lock().await.take() else {
+                return Python::attach(|py| Ok(py.None()));
+            };
+            let status = child.wait().await.map_err(runtime_error)?;
+            if !status.success() {
+                return Err(PyRuntimeError::new_err(format!(
+                    "sandbox process exited with {status}"
+                )));
+            }
+
+            Python::attach(|py| Ok(py.None()))
+        })
+    }
+
+    fn close_worker<'py>(&self, py: Python<'py>, worker_id: u64) -> PyResult<Bound<'py, PyAny>> {
+        let requests = self.requests.clone();
+        let closed = self.closed.clone();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if closed.load(Ordering::Acquire) {
+                return Err(PyRuntimeError::new_err("sandbox process is closed"));
+            }
+            let response = request(
+                &requests,
+                Frame::new(FrameKind::CloseWorker, worker_id, request_id, Vec::new()),
+                Some(FrameKind::ControlResult),
+            )
+            .await?
+            .ok_or_else(|| PyRuntimeError::new_err("worker close returned no response"))?;
+            let result: ControlResult =
+                decode_payload(&response.frame.payload).map_err(runtime_error)?;
+            if let Some(error) = result.error {
+                return Err(PyRuntimeError::new_err(error));
+            }
+            Python::attach(|py| Ok(py.None()))
+        })
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    executable,
+    socket_name,
+    component_path,
+    python_root,
+    *,
+    executable_arguments = Vec::new(),
+    max_ipc_frame_bytes = DEFAULT_MAX_FRAME_BYTES,
+))]
+fn start_sandbox<'py>(
+    py: Python<'py>,
+    executable: PathBuf,
+    socket_name: String,
+    component_path: PathBuf,
+    python_root: PathBuf,
+    executable_arguments: Vec<String>,
+    max_ipc_frame_bytes: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let mut child = Command::new(executable)
+            .args(executable_arguments)
+            .arg(&socket_name)
+            .arg(component_path)
+            .arg(python_root)
+            .arg(max_ipc_frame_bytes.to_string())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(runtime_error)?;
+        let connection = connect_to_sandbox(&mut child, &socket_name).await?;
+        let (guest_calls, guest_call_receiver) = mpsc::channel(64);
+        let requests = spawn_connection_actor(connection, guest_calls, max_ipc_frame_bytes);
+        let rpc_handlers = Arc::new(StdMutex::new(HashMap::new()));
+        spawn_guest_call_dispatcher(guest_call_receiver, requests.clone(), rpc_handlers.clone());
+
+        Python::attach(|py| {
+            Py::new(
+                py,
+                SandboxProcess {
+                    requests,
+                    child: Arc::new(Mutex::new(Some(child))),
+                    next_request_id: Arc::new(AtomicU64::new(1)),
+                    closed: Arc::new(AtomicBool::new(false)),
+                    rpc_handlers,
+                },
+            )
+        })
+    })
+}
+
+struct ConnectionRequest {
+    frame: Frame,
+    expected_kind: Option<FrameKind>,
+    response: oneshot::Sender<Result<Option<ConnectionResponse>, String>>,
+    output: Option<SharedOutput>,
+}
+
+struct PendingRequest {
+    expected_kind: FrameKind,
+    response: oneshot::Sender<Result<Option<ConnectionResponse>, String>>,
+    output: SharedOutput,
+}
+
+struct ConnectionResponse {
+    frame: Frame,
+}
+
+type SharedOutput = Arc<StdMutex<Vec<OutputPayload>>>;
+
+fn spawn_connection_actor(
+    connection: Stream,
+    guest_calls: mpsc::Sender<Frame>,
+    max_ipc_frame_bytes: usize,
+) -> mpsc::Sender<ConnectionRequest> {
+    let (requests, mut request_receiver) = mpsc::channel::<ConnectionRequest>(64);
+    let (incoming, mut incoming_receiver) = mpsc::channel(64);
+    let (mut reader, mut writer) = connection.split();
+
+    tokio::spawn(async move {
+        loop {
+            let frame = read_frame(&mut reader, max_ipc_frame_bytes)
+                .await
+                .map_err(|error| error.to_string());
+            let failed = frame.is_err();
+            if incoming.send(frame).await.is_err() || failed {
+                return;
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut pending = HashMap::<u64, PendingRequest>::new();
+        loop {
+            tokio::select! {
+                request = request_receiver.recv() => {
+                    let Some(request) = request else {
+                        return;
+                    };
+
+                    let ConnectionRequest {
+                        frame,
+                        expected_kind,
+                        response,
+                        output,
+                    } = request;
+                    let mut notification_response = None;
+                    match expected_kind {
+                        Some(expected_kind) => {
+                            pending.insert(
+                                frame.request_id,
+                                PendingRequest {
+                                    expected_kind,
+                                    response,
+                                    output: output.unwrap_or_default(),
+                                },
+                            );
+                        }
+                        None => notification_response = Some(response),
+                    }
+
+                    if let Err(error) = write_frame(&mut writer, &frame).await {
+                        if let Some(pending_request) = pending.remove(&frame.request_id) {
+                            let _ = pending_request.response.send(Err(error.to_string()));
+                        } else if let Some(response) = notification_response.take() {
+                            let _ = response.send(Err(error.to_string()));
+                        }
+                        fail_pending_requests(&mut pending, error.to_string());
+                        return;
+                    }
+
+                    if let Some(response) = notification_response {
+                        let _ = response.send(Ok(None));
+                    }
+                }
+                incoming = incoming_receiver.recv() => {
+                    let Some(incoming) = incoming else {
+                        fail_pending_requests(
+                            &mut pending,
+                            "sandbox connection reader stopped".into(),
+                        );
+                        return;
+                    };
+                    let frame = match incoming {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            fail_pending_requests(&mut pending, error);
+                            return;
+                        }
+                    };
+
+                    if frame.kind == FrameKind::Output {
+                        let Some(request) = pending.get_mut(&frame.request_id) else {
+                            continue;
+                        };
+                        match decode_payload::<OutputPayload>(&frame.payload) {
+                            Ok(output) => {
+                                let mut output_events =
+                                    request.output.lock().expect("output lock poisoned");
+                                if let Some(previous) = output_events.last_mut()
+                                    && previous.source == output.source
+                                {
+                                    previous.data.extend(output.data);
+                                } else {
+                                    output_events.push(output);
+                                }
+                            }
+                            Err(error) => {
+                                let request = pending
+                                    .remove(&frame.request_id)
+                                    .expect("pending request was just found");
+                                let _ = request.response.send(Err(error.to_string()));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if frame.kind == FrameKind::GuestCall {
+                        if guest_calls.send(frame).await.is_err() {
+                            fail_pending_requests(
+                                &mut pending,
+                                "guest RPC dispatcher stopped".into(),
+                            );
+                            return;
+                        }
+                        continue;
+                    }
+
+                    let Some(request) = pending.remove(&frame.request_id) else {
+                        continue;
+                    };
+                    if frame.kind == FrameKind::Error {
+                        let error = String::from_utf8_lossy(&frame.payload).into_owned();
+                        let _ = request.response.send(Err(error));
+                    } else if frame.kind != request.expected_kind {
+                        let _ = request.response.send(Err(format!(
+                            "expected {:?}, received {:?}",
+                            request.expected_kind,
+                            frame.kind,
+                        )));
+                    } else {
+                        let _ = request.response.send(Ok(Some(ConnectionResponse {
+                            frame,
+                        })));
+                    }
+                }
+            }
+        }
+    });
+
+    requests
+}
+
+fn spawn_guest_call_dispatcher(
+    mut guest_calls: mpsc::Receiver<Frame>,
+    requests: mpsc::Sender<ConnectionRequest>,
+    handlers: RpcHandlers,
+) {
+    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        while let Some(frame) = guest_calls.recv().await {
+            let result = match decode_payload::<RpcCall>(&frame.payload) {
+                Ok(call) => invoke_rpc_handler(&handlers, call).await,
+                Err(error) => Err(error.to_string()),
+            };
+            let response = match result {
+                Ok(value) => RpcResult { value, error: None },
+                Err(error) => RpcResult {
+                    value: Vec::new(),
+                    error: Some(error),
+                },
+            };
+            let Ok(payload) = encode_payload(&response) else {
+                continue;
+            };
+            let _ = request(
+                &requests,
+                Frame::new(
+                    FrameKind::GuestResponse,
+                    frame.worker_id,
+                    frame.request_id,
+                    payload,
+                ),
+                None,
+            )
+            .await;
+        }
+    });
+}
+
+async fn invoke_rpc_handler(handlers: &RpcHandlers, call: RpcCall) -> Result<Vec<u8>, String> {
+    let (handler, locals) = Python::attach(|py| {
+        let handlers = handlers.lock().expect("RPC handler lock poisoned");
+        let handler = handlers
+            .get(&call.method)
+            .ok_or_else(|| format!("unknown RPC method: {}", call.method))?;
+        Ok::<_, String>((handler.callable.clone_ref(py), handler.locals.clone()))
+    })?;
+
+    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
+        let cbor2 = py.import("cbor2")?;
+        let decoded = cbor2.call_method1("loads", (PyBytes::new(py, &call.arguments),))?;
+        let args = decoded.get_item(0)?;
+        let kwargs = decoded.get_item(1)?;
+        let args = py.get_type::<PyTuple>().call1((args,))?;
+        let result = handler
+            .bind(py)
+            .call(args.cast::<PyTuple>()?, Some(kwargs.cast::<PyDict>()?))?;
+        let is_awaitable = py
+            .import("inspect")?
+            .call_method1("isawaitable", (&result,))?
+            .is_truthy()?;
+        Ok((result.unbind(), is_awaitable))
+    })
+    .map_err(|error| error.to_string())?;
+
+    let value = if invocation.1 {
+        let future = Python::attach(|py| {
+            pyo3_async_runtimes::into_future_with_locals(&locals, invocation.0.bind(py).clone())
+        })
+        .map_err(|error| error.to_string())?;
+        future.await.map_err(|error| error.to_string())?
+    } else {
+        invocation.0
+    };
+
+    Python::attach(|py| {
+        py.import("cbor2")
+            .and_then(|cbor2| cbor2.call_method1("dumps", (value.bind(py),)))
+            .and_then(|encoded| encoded.extract::<Vec<u8>>())
+            .map_err(|error| error.to_string())
+    })
+}
+
+async fn request(
+    requests: &mpsc::Sender<ConnectionRequest>,
+    frame: Frame,
+    expected_kind: Option<FrameKind>,
+) -> PyResult<Option<ConnectionResponse>> {
+    request_with_output(requests, frame, expected_kind, None).await
+}
+
+async fn request_with_output(
+    requests: &mpsc::Sender<ConnectionRequest>,
+    frame: Frame,
+    expected_kind: Option<FrameKind>,
+    output: Option<SharedOutput>,
+) -> PyResult<Option<ConnectionResponse>> {
+    let (response, receiver) = oneshot::channel();
+    requests
+        .send(ConnectionRequest {
+            frame,
+            expected_kind,
+            response,
+            output,
+        })
+        .await
+        .map_err(|_| PyRuntimeError::new_err("sandbox connection is closed"))?;
+    let response = receiver
+        .await
+        .map_err(|_| PyRuntimeError::new_err("sandbox connection stopped"))?
+        .map_err(PyRuntimeError::new_err)?;
+    Ok(response)
+}
+
+fn fail_pending_requests(pending: &mut HashMap<u64, PendingRequest>, error: String) {
+    for (_, request) in pending.drain() {
+        let _ = request.response.send(Err(error.clone()));
+    }
+}
+
+async fn execute_request(
+    requests: &mpsc::Sender<ConnectionRequest>,
+    worker_id: u64,
+    request_id: u64,
+    payload: Vec<u8>,
+    output: SharedOutput,
+) -> PyResult<pysandbox_protocol::ExecuteResult> {
+    let response = request_with_output(
+        requests,
+        Frame::new(FrameKind::Execute, worker_id, request_id, payload),
+        Some(FrameKind::ExecuteResult),
+        Some(output),
+    )
+    .await?
+    .ok_or_else(|| PyRuntimeError::new_err("execution returned no response"))?;
+    decode_payload(&response.frame.payload).map_err(runtime_error)
+}
+
+fn output_snapshot(output: &SharedOutput) -> Vec<OutputPayload> {
+    output.lock().expect("output lock poisoned").clone()
+}
+
+#[pyclass(name = "Execution")]
+struct NativeExecution {
+    worker_id: u64,
+    execution_id: u64,
+    requests: mpsc::Sender<ConnectionRequest>,
+    next_request_id: Arc<AtomicU64>,
+    output: SharedOutput,
+    result: watch::Receiver<Option<Result<pysandbox_protocol::ExecuteResult, String>>>,
+}
+
+#[pymethods]
+impl NativeExecution {
+    #[getter]
+    fn execution_id(&self) -> u64 {
+        self.execution_id
+    }
+
+    #[getter]
+    fn output(&self, py: Python<'_>) -> PyResult<Vec<Py<NativeOutputEvent>>> {
+        output_events(py, &output_snapshot(&self.output))
+    }
+
+    fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut result = self.result.clone();
+        let output = self.output.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            loop {
+                if let Some(outcome) = result.borrow().clone() {
+                    let result = outcome.map_err(PyRuntimeError::new_err)?;
+                    return Python::attach(|py| {
+                        Py::new(
+                            py,
+                            NativeExecutionResult {
+                                error: result.error,
+                                output: output_snapshot(&output),
+                            },
+                        )
+                    });
+                }
+                result
+                    .changed()
+                    .await
+                    .map_err(|_| PyRuntimeError::new_err("execution task stopped"))?;
+            }
+        })
+    }
+
+    fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.control(
+            py,
+            FrameKind::Cancel,
+            encode_payload(&CancelRequest {
+                execution_id: self.execution_id,
+            })
+            .map_err(runtime_error)?,
+        )
+    }
+
+    #[pyo3(signature = (path, fuel, /, *args, **kwargs))]
+    fn call<'py>(
+        &self,
+        py: Python<'py>,
+        path: Vec<String>,
+        fuel: Option<(String, u64, Option<u64>)>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let empty_kwargs = PyDict::new(py);
+        let kwargs = kwargs.unwrap_or(&empty_kwargs);
+        let arguments = py
+            .import("cbor2")?
+            .call_method1("dumps", ((args, kwargs),))?
+            .extract::<Vec<u8>>()?;
+        let fuel = fuel
+            .map(|(operation, value, cap)| match operation.as_str() {
+                "set" => Ok(FuelOperation::Set { fuel: value }),
+                "add" => Ok(FuelOperation::Add { amount: value, cap }),
+                _ => Err(PyValueError::new_err(format!(
+                    "unknown fuel operation: {operation}"
+                ))),
+            })
+            .transpose()?;
+        let payload = encode_payload(&WorkerRpcCall {
+            path,
+            fuel,
+            arguments,
+        })
+        .map_err(runtime_error)?;
+        let requests = self.requests.clone();
+        let worker_id = self.worker_id;
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = request(
+                &requests,
+                Frame::new(FrameKind::WorkerCall, worker_id, request_id, payload),
+                Some(FrameKind::WorkerResponse),
+            )
+            .await?
+            .ok_or_else(|| PyRuntimeError::new_err("worker RPC returned no response"))?;
+            let result: RpcResult =
+                decode_payload(&response.frame.payload).map_err(runtime_error)?;
+            if let Some(error) = result.error {
+                return Err(PyRuntimeError::new_err(error));
+            }
+            Python::attach(|py| {
+                py.import("cbor2")?
+                    .call_method1("loads", (PyBytes::new(py, &result.value),))
+                    .map(Bound::unbind)
+            })
+        })
+    }
+
+    fn set_fuel<'py>(&self, py: Python<'py>, fuel: u64) -> PyResult<Bound<'py, PyAny>> {
+        self.update(
+            py,
+            ExecutionControl::SetFuel {
+                execution_id: self.execution_id,
+                fuel,
+            },
+        )
+    }
+
+    #[pyo3(signature = (amount, *, cap = None))]
+    fn add_fuel<'py>(
+        &self,
+        py: Python<'py>,
+        amount: u64,
+        cap: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.update(
+            py,
+            ExecutionControl::AddFuel {
+                execution_id: self.execution_id,
+                amount,
+                cap,
+            },
+        )
+    }
+
+    #[pyo3(signature = (
+        *,
+        max_memory_bytes = None,
+        max_output_bytes = None,
+        max_guest_rpc_bytes = None,
+        timeout = None,
+    ))]
+    fn set_limits<'py>(
+        &self,
+        py: Python<'py>,
+        max_memory_bytes: Option<u64>,
+        max_output_bytes: Option<u64>,
+        max_guest_rpc_bytes: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.update(
+            py,
+            ExecutionControl::SetLimits {
+                execution_id: self.execution_id,
+                max_memory_bytes,
+                max_output_bytes,
+                max_guest_rpc_bytes,
+                timeout_ms: timeout_milliseconds(timeout)?,
+            },
+        )
+    }
+}
+
+impl NativeExecution {
+    fn update<'py>(
+        &self,
+        py: Python<'py>,
+        update: ExecutionControl,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.control(
+            py,
+            FrameKind::UpdateLimits,
+            encode_payload(&update).map_err(runtime_error)?,
+        )
+    }
+
+    fn control<'py>(
+        &self,
+        py: Python<'py>,
+        kind: FrameKind,
+        payload: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let requests = self.requests.clone();
+        let worker_id = self.worker_id;
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = request(
+                &requests,
+                Frame::new(kind, worker_id, request_id, payload),
+                Some(FrameKind::ControlResult),
+            )
+            .await?
+            .ok_or_else(|| PyRuntimeError::new_err("control request returned no response"))?;
+            let result: ControlResult =
+                decode_payload(&response.frame.payload).map_err(runtime_error)?;
+            if let Some(error) = result.error {
+                return Err(PyRuntimeError::new_err(error));
+            }
+            Python::attach(|py| Ok(py.None()))
+        })
+    }
+}
+
+#[pyclass(name = "OutputEvent", frozen)]
+struct NativeOutputEvent {
+    source: &'static str,
+    data: Vec<u8>,
+}
+
+#[pymethods]
+impl NativeOutputEvent {
+    #[getter]
+    fn source(&self) -> &'static str {
+        self.source
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.data)
+    }
+}
+
+#[pyclass(name = "ExecutionResult", frozen)]
+struct NativeExecutionResult {
+    error: Option<String>,
+    output: Vec<OutputPayload>,
+}
+
+#[pymethods]
+impl NativeExecutionResult {
+    #[getter]
+    fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    #[getter]
+    fn output(&self, py: Python<'_>) -> PyResult<Vec<Py<NativeOutputEvent>>> {
+        output_events(py, &self.output)
+    }
+
+    #[getter]
+    fn stdout<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(
+            py,
+            &self
+                .output
+                .iter()
+                .filter(|event| event.source == OutputSource::Stdout)
+                .flat_map(|event| event.data.iter().copied())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[getter]
+    fn stderr<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(
+            py,
+            &self
+                .output
+                .iter()
+                .filter(|event| event.source == OutputSource::Stderr)
+                .flat_map(|event| event.data.iter().copied())
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
+fn output_events(py: Python<'_>, output: &[OutputPayload]) -> PyResult<Vec<Py<NativeOutputEvent>>> {
+    output
+        .iter()
+        .map(|event| {
+            Py::new(
+                py,
+                NativeOutputEvent {
+                    source: match event.source {
+                        OutputSource::Stdout => "stdout",
+                        OutputSource::Stderr => "stderr",
+                    },
+                    data: event.data.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+async fn connect_to_sandbox(child: &mut Child, socket_name: &str) -> PyResult<Stream> {
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        let name = if GenericNamespaced::is_supported() {
+            socket_name
+                .to_ns_name::<GenericNamespaced>()
+                .map_err(runtime_error)?
+        } else {
+            socket_name
+                .to_fs_name::<GenericFilePath>()
+                .map_err(runtime_error)?
+        };
+
+        match Stream::connect(name).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                if let Some(status) = child.try_wait().map_err(runtime_error)? {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "sandbox process exited before accepting connections: {status}"
+                    )));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "timed out connecting to sandbox process: {error}"
+                    )));
+                }
+                tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+            }
+        }
+    }
+}
+
+fn runtime_error(error: impl std::fmt::Display) -> PyErr {
+    PyRuntimeError::new_err(error.to_string())
+}
+
+fn timeout_milliseconds(timeout: Option<f64>) -> PyResult<Option<u64>> {
+    let Some(timeout) = timeout else {
+        return Ok(None);
+    };
+    if !timeout.is_finite() || timeout <= 0.0 {
+        return Err(PyValueError::new_err(
+            "timeout must be a positive finite number of seconds",
+        ));
+    }
+    let milliseconds = (timeout * 1_000.0).ceil();
+    if milliseconds > u64::MAX as f64 {
+        return Err(PyValueError::new_err("timeout is too large"));
+    }
+    Ok(Some(milliseconds.max(1.0) as u64))
+}
+
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<NativeExecution>()?;
+    module.add_class::<NativeExecutionResult>()?;
+    module.add_class::<NativeOutputEvent>()?;
+    module.add_class::<SandboxProcess>()?;
     module.add_function(wrap_pyfunction!(protocol_version, module)?)?;
+    module.add_function(wrap_pyfunction!(run_sandboxd, module)?)?;
     module.add_function(wrap_pyfunction!(sleep, module)?)?;
+    module.add_function(wrap_pyfunction!(start_sandbox, module)?)?;
     Ok(())
 }

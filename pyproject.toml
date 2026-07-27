@@ -6,11 +6,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cbor2>=6",
-    "wasmtime>=47.0.1",
 ]
 
 [build-system]
-requires = ["maturin>=1.10,<2"]
+requires = [
+    "componentize-py",
+    "maturin>=1.10,<2",
+]
 build-backend = "maturin"
 
 [dependency-groups]
@@ -22,14 +24,29 @@ dev = [
 manifest-path = "rust/pysandbox-native/Cargo.toml"
 module-name = "pysandbox._core"
 python-source = "."
+include = [
+    { path = "pysandbox.wasm", from = "out-dir", to = "pysandbox/_runtime/", crate-name = "pysandbox-native" },
+    { path = "runtime/**/*", from = "out-dir", to = "pysandbox/_runtime/", crate-name = "pysandbox-native" },
+    { path = "component/**/*", format = "sdist" },
+    { path = "vendor/cbor2/cbor2/**/*", format = "sdist" },
+    { path = "vendor/cbor2/pyproject.toml", format = "sdist" },
+]
 
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
+exclude = [
+    ".venv",
+    "component",
+    "target",
+    "tmp",
+    "vendor",
+]
 
 [tool.ruff]
 indent-width = 2
+extend-exclude = ["vendor"]
 
 [tool.ruff.format]
 quote-style = "preserve"

@@ -1,58 +1,106 @@
 # pysandbox
 
-A small Wasmtime-backed Python sandbox. It runs WASI CPython in an isolated worker process, captures stdout/stderr, and exposes a synchronous two-way RPC bridge.
+An asynchronous Wasmtime-backed Python sandbox with two-way RPC.
 
-## Interactive Demo
+## Demo
 
 ```sh
 uv run demo.py
 ```
 
-## Basic Use
+## One-Shot Execution
 
 ```python
+import asyncio
+
 from pysandbox import PythonRuntime, RuntimeLimits
 
-runtime = PythonRuntime()
 
-@runtime.rpc.expose
-def add(a: int, b: int) -> int:
-    return int(a) + int(b)
+async def main() -> None:
+    runtime = PythonRuntime()
 
-result = runtime.execute(
-    "print('2 + 5 =', add(2, 5))",
-    limits=RuntimeLimits(
-        fuel=10_000_000_000,
-        replenish_fuel_interval=30,
-    ),
-    timeout=30,
+    @runtime.rpc.expose
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    try:
+        result = await runtime.execute(
+            'print("2 + 5 =", await add(2, 5), flush=True)',
+            limits=RuntimeLimits(timeout=30),
+        )
+        result.raise_for_error()
+        print(result.text, end="")
+    finally:
+        await runtime.close()
+
+
+asyncio.run(main())
+```
+
+Exposed host handlers may be synchronous or asynchronous. Guest proxies are
+asynchronous, so guest code calls them with `await`.
+
+## Persistent Workers
+
+`run()` starts a persistent guest and returns immediately:
+
+```python
+worker = runtime.run(
+    """
+value = 40
+
+def increment(amount):
+    global value
+    value += amount
+    return value
+"""
 )
 
-print(result.exit_code)
-print(result.text)
+print(await worker.call(("increment",), None, 2))
+await worker.close()
 ```
 
-## RPC
+The worker preserves its Python globals between calls. `worker.task` resolves
+when the guest exits, and `worker.output` exposes output collected so far.
 
-Expose host functions with `runtime.rpc.expose`:
+The positional options slot controls the call without reserving guest keyword
+arguments:
 
 ```python
-@runtime.rpc.expose("sum")
-def add(a: int, b: int) -> int:
-    return a + b
+from pysandbox import AddFuel, WorkerCallOptions
+
+options = WorkerCallOptions(
+    fuel=AddFuel(500_000, cap=2_000_000),
+    timeout=10,
+)
+print(await worker.call(("increment",), options, 2))
 ```
 
-Guest code can call configured methods directly because `PythonRuntime` prepends `from api import *`:
+## Limits
+
+Limits belong to an execution:
 
 ```python
-print(sum(2, 5))
+limits = RuntimeLimits(
+    max_memory_bytes=128 * 1024 * 1024,
+    max_output_bytes=256 * 1024,
+    max_guest_rpc_bytes=10 * 1024 * 1024,
+    fuel=2**64 - 1,
+    timeout=30,
+)
 ```
 
-Long-lived workers can receive host calls through the same channel.
+Persistent workers can update limits while running:
+
+```python
+await worker.set_fuel(1_000_000)
+await worker.add_fuel(500_000, cap=2_000_000)
+await worker.set_limits(max_output_bytes=512 * 1024, timeout=60)
+```
 
 ## Output
 
-stdout and stderr are captured as interlaced output events:
+stdout and stderr are retained as interlaced output events:
 
 ```python
 print(result.stdout)
@@ -60,28 +108,25 @@ print(result.stderr)
 print(result.text)
 ```
 
-For terminal output, `formatted_text()` can add stream-specific markers:
+`formatted_text()` can mark transitions between streams:
 
 ```python
 print(
-    result.formatted_text(
-        stderr=(b"\x1b[31m", b"\x1b[0m"),
-    ),
+    result.formatted_text(stderr=(b"\x1b[31m", b"\x1b[0m")),
     end="",
 )
 ```
 
 ## Internals
 
-- Runtime assets are checked against their GitHub releases on setup; each extracted asset stores its selected release in `.release`.
-- The guest `api`, `messaging`, and `cbor2` packages are mounted directly at guest `site-packages`; `cbor2` is stored beside the runtime under `python-wasi/cbor2`.
-- After an asset update, the WASI interpreter compiles the runtime `lib` tree and the `cbor2` tree once.
-- Runtime files are mounted readonly for normal execution.
-- Each execution runs in a spawned `multiprocessing` worker.
-- Wasmtime loads `python.wasm`; WASI preopens the runtime at `/`.
-- stdin is fed from memory through the worker stdin pipe.
-- stdout and stderr are captured through Wasmtime custom stream callbacks.
-- RPC messages are CBOR packets framed by `messaging.Messenger`.
-- The guest receives the `api`, `messaging`, and `cbor2` packages in `/lib/.../site-packages`.
-- The RPC transport uses two rotating request files and two rotating response files under `/__pysandbox_rpc__`.
-- Request files are writable by the guest; response files and runtime files are readonly during normal execution.
+- A PyO3 extension supervises a Rust sandbox subprocess without blocking the
+  application's asyncio loop.
+- The subprocess shares a Wasmtime engine and compiled component. Each worker
+  owns an isolated Store and component instance.
+- Guest Python uses a componentized CPython runtime and supports top-level
+  `await`.
+- A persistent framed local socket carries lifecycle commands, output, limit
+  updates, cancellation, and bidirectional RPC.
+- The packaged component and runtime modules are built with the wheel.
+- Closing a one-shot execution or worker destroys its Store. Closing the
+  runtime shuts down the shared sandbox subprocess.

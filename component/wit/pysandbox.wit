@@ -1,0 +1,27 @@
+package pysandbox:python;
+
+interface host {
+  record worker-call {
+    request-id: u64,
+    path: list<string>,
+    arguments: list<u8>,
+  }
+
+  record spin-event {
+    call: option<worker-call>,
+  }
+
+  program: func() -> string;
+  call: async func(method: string, arguments: list<u8>) -> result<list<u8>, string>;
+  spin-next: async func() -> option<spin-event>;
+  worker-response: async func(
+    request-id: u64,
+    value: list<u8>,
+    error: option<string>,
+  );
+}
+
+world python {
+  import host;
+  export run: async func() -> result<_, string>;
+}

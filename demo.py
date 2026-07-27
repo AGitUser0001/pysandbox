@@ -12,7 +12,7 @@ import tokenize
 import traceback
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 from pysandbox import PythonRuntime, RuntimeLimits
 
@@ -29,7 +29,7 @@ TYPEWRITER_DELAY = 0.002
 PRESENTATION_PAUSE = 5.0
 DEMO_LIMITS = RuntimeLimits(
     fuel=10_000_000_000,
-    replenish_fuel_interval=30,
+    timeout=30,
 )
 PRESENTATION_READING_CHARS_PER_SECOND = 42.0
 PRESENTATION_MIN_PAUSE = 0.6
@@ -162,8 +162,8 @@ def tutorial_program() -> str:
         import sys
 
         print("hello from WASI Python")
-        print("2 + 5 =", add(a=2, b=5))
-        print(host_upper("guest code can call host functions"), flush=True)
+        print("2 + 5 =", await add(a=2, b=5))
+        print(await host_upper("guest code can call host functions"), flush=True)
         print("stderr stays separate", file=sys.stderr)
         """
     ).strip()
@@ -173,8 +173,8 @@ def worker_program() -> str:
     return textwrap.dedent(
         """
         class Calculator:
-            def scale(self, value, by=1):
-                return add(value, by) * by
+            async def scale(self, value, by=1):
+                return await add(value, by) * by
 
         calculator = Calculator()
         """
@@ -188,14 +188,17 @@ def worker_call_example() -> str:
             worker_program,
             limits=RuntimeLimits(
                 fuel=10_000_000_000,
-                replenish_fuel_interval=30,
+                timeout=30,
             ),
-            spin=True,
-            timeout=30,
         )
         try:
             for value in range(3):
-                result = await worker.call(("calculator", "scale"), value + 5, by=3, timeout=5)
+                result = await worker.call(
+                    ("calculator", "scale"),
+                    None,
+                    value + 5,
+                    by=3,
+                )
                 print("worker result:", result)
                 await asyncio.sleep(0.25)
         finally:
@@ -265,10 +268,10 @@ def continue_prompt() -> bool:
     return prompt(f"{DIM}continue...{RESET}") is not None
 
 
-def execute_code(runtime: PythonRuntime, source: str) -> None:
-    result = runtime.execute(source, limits=DEMO_LIMITS, timeout=30)
+async def execute_code(runtime: PythonRuntime, source: str) -> None:
+    result = await runtime.execute(source, limits=DEMO_LIMITS)
 
-    typewrite(f"exit code: {result.exit_code}")
+    typewrite("execution: ok" if result.error is None else "execution: failed")
     typewrite(
         result.formatted_text(
             stderr=(f"{RED}[stderr] ".encode(), RESET.encode()),
@@ -279,14 +282,14 @@ def execute_code(runtime: PythonRuntime, source: str) -> None:
         typewrite("")
 
 
-def one_shot_demo(runtime: PythonRuntime) -> None:
+async def one_shot_demo(runtime: PythonRuntime) -> None:
     section("one-shot execution")
     paragraph("Guest code is sent on stdin to WASI CPython. The runtime prepends an API import, so exposed host RPC functions are available as ordinary callables.")
     step("demo")
     code_block(tutorial_program())
     if not run_prompt():
         return
-    execute_code(runtime, tutorial_program())
+    await execute_code(runtime, tutorial_program())
     continue_prompt()
 
 
@@ -304,16 +307,14 @@ async def worker_demo(runtime: PythonRuntime) -> None:
     worker = runtime.run(
         worker_program(),
         limits=DEMO_LIMITS,
-        spin=True,
-        timeout=30,
     )
     try:
         for value in range(3):
             result = await worker.call(
                 ("calculator", "scale"),
+                None,
                 value + 5,
                 by=3,
-                timeout=5,
             )
             typewrite(f"{GREEN}host -> guest worker call{RESET}: {result}")
             await asyncio.sleep(0.25)
@@ -348,14 +349,15 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
         "execute guest code",
         textwrap.dedent(
             """
-            result = runtime.execute(\"\"\"
+            async def main() -> None:
+                result = await runtime.execute(\"\"\"
             print("hello from guest")
-            print("2 + 5 =", add(a=2, b=5))
-            \"\"\", limits=RuntimeLimits(
-                fuel=10_000_000_000,
-                replenish_fuel_interval=30,
-            ), timeout=30)
-            print(result.formatted_text())
+            print("2 + 5 =", await add(a=2, b=5))
+            \"\"\", limits=RuntimeLimits(fuel=10_000_000_000, timeout=30))
+                print(result.formatted_text())
+                await runtime.close()
+
+            asyncio.run(main())
             """
         ).strip(),
     ),
@@ -369,15 +371,14 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
                     "value = 41",
                     limits=RuntimeLimits(
                         fuel=10_000_000_000,
-                        replenish_fuel_interval=30,
+                        timeout=30,
                     ),
-                    spin=True,
-                    timeout=30,
                 )
                 try:
-                    print(await worker.call(("eval",), "value + 1", timeout=5))
+                    print(await worker.call(("eval",), None, "value + 1"))
                 finally:
                     await worker.close()
+                    await runtime.close()
 
             asyncio.run(main())
             """
@@ -477,7 +478,7 @@ def read_line_repl_block() -> EditorResult | None:
 
 
 class KeyReader(Protocol):
-    def __enter__(self) -> "KeyReader":
+    def __enter__(self) -> Self:
         raise NotImplementedError
 
     def __exit__(
@@ -499,7 +500,7 @@ class PosixKeyReader:
         self.fd = sys.stdin.fileno()
         self.old_settings: list[object] | None = None
 
-    def __enter__(self) -> "PosixKeyReader":
+    def __enter__(self) -> Self:
         self.old_settings = self.termios.tcgetattr(self.fd)
         self.tty.setraw(self.fd)
         return self
@@ -536,7 +537,7 @@ class WindowsKeyReader:
     def __init__(self, msvcrt: ModuleType) -> None:
         self.msvcrt = msvcrt
 
-    def __enter__(self) -> "WindowsKeyReader":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
@@ -946,7 +947,7 @@ def execute_host_expression(source: str, namespace: dict[str, Any]) -> bool:
 
 
 def execute_host_statements(source: str, namespace: dict[str, Any]) -> None:
-    exec(compile(source, "<host>", "exec"), namespace)
+    exec(compile(source, "<host>", "exec"), namespace)  # noqa: S102
 
 
 def highlight_python(source: str) -> str:
@@ -1015,31 +1016,35 @@ def highlight_token(token: tokenize.TokenInfo) -> str:
     return text
 
 
+async def tutorial() -> None:
+    runtime = create_runtime()
+    try:
+        typewrite(f"{BOLD}pysandbox tutorial{RESET}")
+        paragraph("This demo runs WASI CPython in an isolated sandbox process, exposes host functions over RPC, captures interlaced stdout/stderr, and then starts a long-lived guest worker.")
+
+        section("host setup")
+        paragraph("Create a runtime and expose trusted host functions. The guest can call these by name.")
+        step("demo")
+        code_block(host_setup_example())
+        if not run_prompt():
+            return
+        typewrite(f"{GREEN}runtime ready{RESET}: exposed methods = {', '.join(runtime.rpc.methods)}")
+        if not continue_prompt():
+            return
+
+        await one_shot_demo(runtime)
+        await worker_demo(runtime)
+    finally:
+        await runtime.close()
+
+
 def main() -> None:
     args = parse_args()
     enable_readline()
-
     if args.editor:
         playground()
         return
-
-    runtime = create_runtime()
-
-    typewrite(f"{BOLD}pysandbox tutorial{RESET}")
-    paragraph("This demo runs WASI CPython in a spawned worker process, exposes host functions over RPC, captures interlaced stdout/stderr, and then starts a long-lived guest worker.")
-
-    section("host setup")
-    paragraph("Create a runtime and expose trusted host functions. The guest can call these by name.")
-    step("demo")
-    code_block(host_setup_example())
-    if not run_prompt():
-        return
-    typewrite(f"{GREEN}runtime ready{RESET}: exposed methods = {', '.join(runtime.rpc.methods)}")
-    if not continue_prompt():
-        return
-
-    one_shot_demo(runtime)
-    asyncio.run(worker_demo(runtime))
+    asyncio.run(tutorial())
     playground()
 
 
