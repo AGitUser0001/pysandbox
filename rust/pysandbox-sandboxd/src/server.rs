@@ -25,8 +25,13 @@ pub async fn serve(
     component_path: &Path,
     python_root: &Path,
     max_ipc_frame_bytes: usize,
+    worker_queue_capacity: usize,
     cache_vfs: bool,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        worker_queue_capacity > 0,
+        "worker queue capacity must be positive"
+    );
     let name = if GenericNamespaced::is_supported() {
         socket_name.to_ns_name::<GenericNamespaced>()?
     } else {
@@ -42,6 +47,7 @@ pub async fn serve(
         component_path.to_owned(),
         python_root.to_owned(),
         max_ipc_frame_bytes,
+        worker_queue_capacity,
         cache_vfs,
     )
     .await
@@ -52,6 +58,7 @@ async fn serve_connection(
     component_path: PathBuf,
     python_root: PathBuf,
     max_ipc_frame_bytes: usize,
+    worker_queue_capacity: usize,
     cache_vfs: bool,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = connection.split();
@@ -113,25 +120,36 @@ async fn serve_connection(
                         outgoing.clone(),
                         next_guest_call_id.clone(),
                         pending_guest_calls.clone(),
+                        worker_queue_capacity,
                     )
                 });
-                if worker
-                    .commands
-                    .send(WorkerCommand::Execute {
-                        request_id: frame.request_id,
-                        request,
-                    })
-                    .await
-                    .is_err()
-                {
-                    send_error(
-                        &outgoing,
-                        frame.worker_id,
-                        frame.request_id,
-                        "worker actor stopped".into(),
-                    )
-                    .await?;
-                    workers.remove(&frame.worker_id);
+                let command = WorkerCommand::Execute {
+                    request_id: frame.request_id,
+                    request,
+                };
+                match worker.commands.try_send(command) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        send_execute_result(
+                            &outgoing,
+                            frame.worker_id,
+                            frame.request_id,
+                            Some("worker command queue is full".into()),
+                            TerminationReason::InfrastructureError,
+                        )
+                        .await?;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        send_execute_result(
+                            &outgoing,
+                            frame.worker_id,
+                            frame.request_id,
+                            Some("worker actor stopped".into()),
+                            TerminationReason::InfrastructureError,
+                        )
+                        .await?;
+                        workers.remove(&frame.worker_id);
+                    }
                 }
             }
             FrameKind::Cancel => {
@@ -290,8 +308,9 @@ fn spawn_worker(
     outgoing: mpsc::Sender<Frame>,
     next_guest_call_id: Arc<AtomicU64>,
     pending_guest_calls: PendingGuestCalls,
+    worker_queue_capacity: usize,
 ) -> WorkerHandle {
-    let (commands, mut command_receiver) = mpsc::channel(16);
+    let (commands, mut command_receiver) = mpsc::channel(worker_queue_capacity);
     let (control, control_receiver) = crate::component_worker::WorkerControl::new();
     let actor_control = control.clone();
     let rpc = RpcBridge::new(

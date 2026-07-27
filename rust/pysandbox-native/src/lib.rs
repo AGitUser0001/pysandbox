@@ -46,6 +46,7 @@ fn run_sandboxd(
     component_path: PathBuf,
     python_root: PathBuf,
     max_ipc_frame_bytes: usize,
+    worker_queue_capacity: usize,
     cache_vfs: bool,
 ) -> PyResult<()> {
     py.detach(move || {
@@ -56,6 +57,7 @@ fn run_sandboxd(
                 &component_path,
                 &python_root,
                 max_ipc_frame_bytes,
+                worker_queue_capacity,
                 cache_vfs,
             ))
             .map_err(runtime_error)
@@ -368,6 +370,7 @@ impl SandboxProcess {
     *,
     executable_arguments = Vec::new(),
     max_ipc_frame_bytes = DEFAULT_MAX_FRAME_BYTES,
+    worker_queue_capacity = 256,
     cache_vfs = false,
 ))]
 fn start_sandbox<'py>(
@@ -378,8 +381,14 @@ fn start_sandbox<'py>(
     python_root: PathBuf,
     executable_arguments: Vec<String>,
     max_ipc_frame_bytes: usize,
+    worker_queue_capacity: usize,
     cache_vfs: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if worker_queue_capacity == 0 {
+        return Err(PyValueError::new_err(
+            "worker_queue_capacity must be positive",
+        ));
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let mut child = Command::new(executable)
             .args(executable_arguments)
@@ -387,6 +396,7 @@ fn start_sandbox<'py>(
             .arg(component_path)
             .arg(python_root)
             .arg(max_ipc_frame_bytes.to_string())
+            .arg(worker_queue_capacity.to_string())
             .arg(cache_vfs.to_string())
             .kill_on_drop(true)
             .spawn()

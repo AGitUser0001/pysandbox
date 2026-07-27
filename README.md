@@ -142,6 +142,14 @@ are shared across workers until the host calls
 `await runtime.invalidate_vfs(path)`. Passing no path clears the whole cache.
 The guest cannot write to the VFS.
 
+`worker_queue_capacity` bounds pending executions for each worker. When a
+worker's queue is full, new executions fail immediately without blocking
+traffic for other workers:
+
+```python
+runtime = PythonRuntime(worker_queue_capacity=256)
+```
+
 ## Internals
 
 - A PyO3 extension supervises a Rust sandbox subprocess without blocking the

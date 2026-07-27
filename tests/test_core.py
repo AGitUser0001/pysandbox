@@ -30,6 +30,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         project_root / "component" / "pysandbox.wasm",
         project_root / "vendor" / "cpython" / "Lib",
         executable_arguments=["-m", "pysandbox._sandboxd"],
+        worker_queue_capacity=1,
       )
       self.assertIsNone(await sandbox.health())
       with self.assertRaisesRegex(ValueError, "timeout must be"):
@@ -42,8 +43,14 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         return a * b
 
+      queue_gate = asyncio.Event()
+
+      async def wait_for_queue_gate() -> None:
+        await queue_gate.wait()
+
       sandbox.expose("add", add)
       sandbox.expose("multiply", multiply)
+      sandbox.expose("wait_for_queue_gate", wait_for_queue_gate)
       rpc_result = await sandbox.execute(
         'print(await call("add", 2, b=5), flush=True)\n'
         'print(await call("multiply", 3, 4), flush=True)'
@@ -137,4 +144,29 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         timeout=0.05,
       )
       self.assertIsNotNone(timed_out.error)
+
+      busy = sandbox.run(
+        'print("queue-ready", flush=True)\nawait call("wait_for_queue_gate")',
+        worker_id=3,
+      )
+      for _ in range(1_000):
+        if b"".join(event.data for event in busy.output) == b"queue-ready\n":
+          break
+        await _core.sleep(10)
+      queued = sandbox.run("print('queued', flush=True)", worker_id=3)
+      await _core.sleep(50)
+      overloaded = await asyncio.wait_for(
+        sandbox.execute("pass", worker_id=3),
+        timeout=2,
+      )
+      self.assertEqual(overloaded.reason, "infrastructure_error")
+      self.assertEqual(overloaded.error, "worker command queue is full")
+
+      queue_gate.set()
+      busy_result = await asyncio.wait_for(busy.result(), timeout=2)
+      self.assertIsNone(busy_result.error)
+      queued_result = await asyncio.wait_for(queued.result(), timeout=2)
+      self.assertIsNone(queued_result.error)
+      self.assertEqual(queued_result.stdout, b"queued\n")
+
       self.assertIsNone(await sandbox.close())

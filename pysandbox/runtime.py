@@ -184,12 +184,16 @@ class PythonRuntime:
     self,
     *,
     max_ipc_frame_bytes: int = 50 * 1024 * 1024,
+    worker_queue_capacity: int = 256,
     vfs: VirtualFileSystem | None = None,
     cache_vfs: bool = False,
   ) -> None:
     if max_ipc_frame_bytes <= 0:
       raise ValueError("max_ipc_frame_bytes must be positive")
+    if worker_queue_capacity <= 0:
+      raise ValueError("worker_queue_capacity must be positive")
     self.max_ipc_frame_bytes = max_ipc_frame_bytes
+    self.worker_queue_capacity = worker_queue_capacity
     self.vfs = vfs
     self.cache_vfs = cache_vfs
     self.rpc = RpcHost(self._register_handler)
@@ -292,6 +296,7 @@ class PythonRuntime:
           python_root,
           executable_arguments=["-m", "pysandbox._sandboxd"],
           max_ipc_frame_bytes=self.max_ipc_frame_bytes,
+          worker_queue_capacity=self.worker_queue_capacity,
           cache_vfs=self.cache_vfs,
         )
       except BaseException as error:

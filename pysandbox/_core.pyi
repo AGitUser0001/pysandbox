@@ -8,6 +8,7 @@ def run_sandboxd(
   component_path: str | PathLike[str],
   python_root: str | PathLike[str],
   max_ipc_frame_bytes: int,
+  worker_queue_capacity: int,
   cache_vfs: bool,
 ) -> None: ...
 
@@ -96,5 +97,6 @@ def start_sandbox(
   *,
   executable_arguments: list[str] = [],
   max_ipc_frame_bytes: int = 50 * 1024 * 1024,
+  worker_queue_capacity: int = 256,
   cache_vfs: bool = False,
 ) -> Awaitable[SandboxProcess]: ...

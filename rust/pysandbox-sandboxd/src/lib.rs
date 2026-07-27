@@ -26,6 +26,11 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         .and_then(|value| value.into_string().ok())
         .ok_or_else(|| anyhow::anyhow!(usage()))?
         .parse()?;
+    let worker_queue_capacity = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!(usage()))?
+        .parse()?;
     let cache_vfs = arguments
         .next()
         .map(|value| {
@@ -46,11 +51,13 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         &component_path,
         &python_root,
         max_ipc_frame_bytes,
+        worker_queue_capacity,
         cache_vfs,
     )
     .await
 }
 
 fn usage() -> &'static str {
-    "usage: pysandbox-sandboxd <socket-name> <component> <python-root> <max-ipc-frame-bytes> [cache-vfs]"
+    "usage: pysandbox-sandboxd <socket-name> <component> <python-root> \
+     <max-ipc-frame-bytes> <worker-queue-capacity> [cache-vfs]"
 }

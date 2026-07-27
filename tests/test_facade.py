@@ -13,6 +13,10 @@ from pysandbox import (
 
 
 class FacadeTests(unittest.IsolatedAsyncioTestCase):
+  def test_worker_queue_capacity_validation(self) -> None:
+    with self.assertRaisesRegex(ValueError, "worker_queue_capacity"):
+      PythonRuntime(worker_queue_capacity=0)
+
   async def test_execution_rpc_worker_and_output(self) -> None:
     runtime = PythonRuntime()
 
