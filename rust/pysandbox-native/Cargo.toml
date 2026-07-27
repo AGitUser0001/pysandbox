@@ -17,3 +17,7 @@ pyo3-async-runtimes.workspace = true
 pysandbox-protocol = { path = "../pysandbox-protocol" }
 pysandbox-sandboxd = { path = "../pysandbox-sandboxd" }
 tokio.workspace = true
+
+[build-dependencies]
+pysandbox-sandboxd = { path = "../pysandbox-sandboxd" }
+tokio.workspace = true

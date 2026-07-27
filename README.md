@@ -17,21 +17,21 @@ from pysandbox import PythonRuntime, RuntimeLimits
 
 
 async def main() -> None:
-    runtime = PythonRuntime()
+  runtime = PythonRuntime()
 
-    @runtime.rpc.expose
-    def add(a: int, b: int) -> int:
-        return a + b
+  @runtime.rpc.expose
+  def add(a: int, b: int) -> int:
+    return a + b
 
-    try:
-        result = await runtime.execute(
-            'print("2 + 5 =", await add(2, 5), flush=True)',
-            limits=RuntimeLimits(timeout=30),
-        )
-        result.raise_for_error()
-        print(result.text, end="")
-    finally:
-        await runtime.close()
+  try:
+    result = await runtime.execute(
+      'print("2 + 5 =", await add(2, 5), flush=True)',
+      limits=RuntimeLimits(timeout=30),
+    )
+    result.raise_for_error()
+    print(result.text, end="")
+  finally:
+    await runtime.close()
 
 
 asyncio.run(main())
@@ -46,7 +46,7 @@ asynchronous, so guest code calls them with `await`.
 
 ```python
 worker = runtime.run(
-    """
+  """
 value = 40
 
 def increment(amount):
@@ -70,8 +70,8 @@ arguments:
 from pysandbox import AddFuel, WorkerCallOptions
 
 options = WorkerCallOptions(
-    fuel=AddFuel(500_000, cap=2_000_000),
-    timeout=10,
+  fuel=AddFuel(500_000, cap=2_000_000),
+  timeout=10,
 )
 print(await worker.call(("increment",), options, 2))
 ```
@@ -82,11 +82,11 @@ Limits belong to an execution:
 
 ```python
 limits = RuntimeLimits(
-    max_memory_bytes=128 * 1024 * 1024,
-    max_output_bytes=256 * 1024,
-    max_guest_rpc_bytes=10 * 1024 * 1024,
-    fuel=2**64 - 1,
-    timeout=30,
+  max_memory_bytes=128 * 1024 * 1024,
+  max_output_bytes=256 * 1024,
+  max_guest_rpc_bytes=10 * 1024 * 1024,
+  fuel=2**64 - 1,
+  timeout=30,
 )
 ```
 
@@ -112,10 +112,35 @@ print(result.text)
 
 ```python
 print(
-    result.formatted_text(stderr=(b"\x1b[31m", b"\x1b[0m")),
-    end="",
+  result.formatted_text(stderr=(b"\x1b[31m", b"\x1b[0m")),
+  end="",
 )
 ```
+
+## Virtual Filesystem
+
+`/python` is the packaged, immutable Python runtime. Other guest paths can be
+served by a read-only host VFS:
+
+```python
+from pysandbox import PythonRuntime, VfsDirectoryEntry, VfsMetadata
+
+
+class Vfs:
+  async def stat(self, path: str) -> VfsMetadata: ...
+
+  async def read(self, path: str) -> bytes: ...
+
+  async def list(self, path: str) -> list[VfsDirectoryEntry]: ...
+
+
+runtime = PythonRuntime(vfs=Vfs(), cache_vfs=True)
+```
+
+Handlers may be synchronous or asynchronous. With caching enabled, results
+are shared across workers until the host calls
+`await runtime.invalidate_vfs(path)`. Passing no path clears the whole cache.
+The guest cannot write to the VFS.
 
 ## Internals
 
@@ -126,7 +151,9 @@ print(
 - Guest Python uses a componentized CPython runtime and supports top-level
   `await`.
 - A persistent framed local socket carries lifecycle commands, output, limit
-  updates, cancellation, and bidirectional RPC.
+  updates, cancellation, bidirectional RPC, and VFS requests.
+- WASI routes `/python` to a physical read-only mount and all other paths to
+  the host VFS. Componentized Python is configured not to write bytecode.
 - The packaged component and runtime modules are built with the wheel.
 - Closing a one-shot execution or worker destroys its Store. Closing the
   runtime shuts down the shared sandbox subprocess.

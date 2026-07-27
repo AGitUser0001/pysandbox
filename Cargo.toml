@@ -3,6 +3,7 @@ members = [
     "rust/pysandbox-protocol",
     "rust/pysandbox-sandboxd",
     "rust/pysandbox-native",
+    "vendor/eryx-vfs",
 ]
 exclude = ["vendor/cbor2"]
 resolver = "3"

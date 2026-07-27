@@ -10,9 +10,11 @@ from .runtime import (
   RuntimeResult,
   RuntimeSetupError,
   SetFuel,
+  TerminationReason,
   Worker,
   WorkerCallOptions,
 )
+from .vfs import VfsDirectoryEntry, VfsMetadata, VirtualFileSystem
 
 __all__ = [
   "AddFuel",
@@ -27,6 +29,10 @@ __all__ = [
   "RuntimeResult",
   "RuntimeSetupError",
   "SetFuel",
+  "TerminationReason",
+  "VfsDirectoryEntry",
+  "VfsMetadata",
+  "VirtualFileSystem",
   "Worker",
   "WorkerCallOptions",
 ]

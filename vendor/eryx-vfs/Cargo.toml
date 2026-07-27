@@ -1,0 +1,23 @@
+[package]
+name = "eryx-vfs"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Vendored WASI filesystem bindings used by pysandbox"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+cap-fs-ext = "3"
+cap-std = "3"
+fs-set-times = "0.20"
+system-interface = { version = "0.27", features = ["cap_std_impls"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full", "sync"] }
+tracing = "0.1"
+wasmtime = { version = "46.0.1", features = ["component-model", "async"] }
+wasmtime-wasi = "46.0.1"
+wasmtime-wasi-io = "46.0.1"

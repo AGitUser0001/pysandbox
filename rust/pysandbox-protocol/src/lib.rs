@@ -43,6 +43,9 @@ pub enum FrameKind {
     GuestResponse,
     WorkerCall,
     WorkerResponse,
+    VfsRequest,
+    VfsResponse,
+    InvalidateVfs,
     Output,
     UpdateLimits,
     Cancel,
@@ -98,6 +101,21 @@ pub struct OutputPayload {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecuteResult {
     pub error: Option<String>,
+    pub reason: TerminationReason,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationReason {
+    Completed,
+    GuestError,
+    Timeout,
+    Cancelled,
+    FuelExhausted,
+    OutputLimit,
+    MemoryLimit,
+    RuntimeError,
+    InfrastructureError,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -158,6 +176,69 @@ pub struct WorkerRpcCall {
 pub enum FuelOperation {
     Set { fuel: u64 },
     Add { amount: u64, cap: Option<u64> },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "operation")]
+pub enum VfsRequest {
+    Stat { path: String },
+    Read { path: String },
+    List { path: String },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VfsNodeKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VfsMetadata {
+    pub kind: VfsNodeKind,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VfsDirectoryEntry {
+    pub name: String,
+    pub metadata: VfsMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "value")]
+pub enum VfsValue {
+    Metadata(VfsMetadata),
+    Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
+    Entries(Vec<VfsDirectoryEntry>),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VfsResponse {
+    pub value: Option<VfsValue>,
+    pub error: Option<VfsError>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VfsError {
+    pub code: VfsErrorCode,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VfsErrorCode {
+    NotFound,
+    NotDirectory,
+    IsDirectory,
+    PermissionDenied,
+    Invalid,
+    Io,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InvalidateVfs {
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Error)]

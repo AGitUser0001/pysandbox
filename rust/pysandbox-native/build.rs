@@ -13,6 +13,11 @@ fn main() {
 
     watch_tree(&component_root);
     watch_tree(&project_root.join("vendor/cbor2/cbor2"));
+    watch_tree(&project_root.join("vendor/cpython/Lib"));
+    println!(
+        "cargo:rerun-if-changed={}",
+        project_root.join("vendor/cpython/LICENSE").display()
+    );
 
     let executable = componentize_py(&project_root);
     let status = Command::new(&executable)
@@ -44,7 +49,20 @@ fn main() {
     if runtime_output.exists() {
         fs::remove_dir_all(&runtime_output).expect("failed to clear generated runtime directory");
     }
-    copy_tree(&component_root.join("runtime"), &runtime_output);
+    copy_python_stdlib(&project_root.join("vendor/cpython/Lib"), &runtime_output);
+    fs::copy(
+        project_root.join("vendor/cpython/LICENSE"),
+        runtime_output.join("LICENSE"),
+    )
+    .expect("failed to copy the CPython license");
+
+    tokio::runtime::Runtime::new()
+        .expect("failed to create build runtime")
+        .block_on(pysandbox_sandboxd::component_worker::compile_python_root(
+            &component_output,
+            &runtime_output,
+        ))
+        .expect("failed to compile the Python standard library with WASI");
 }
 
 fn componentize_py(project_root: &Path) -> OsString {
@@ -90,6 +108,24 @@ fn copy_tree(source: &Path, destination: &Path) {
             copy_tree(&path, &target);
         } else {
             fs::copy(&path, &target).expect("failed to copy component runtime file");
+        }
+    }
+}
+
+fn copy_python_stdlib(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("failed to create generated Python runtime directory");
+    for entry in fs::read_dir(source).expect("failed to read CPython standard library") {
+        let path = entry
+            .expect("failed to read CPython standard library entry")
+            .path();
+        if path.file_name().is_some_and(|name| name == "test") {
+            continue;
+        }
+        let target = destination.join(path.file_name().expect("stdlib entry has no filename"));
+        if path.is_dir() {
+            copy_tree(&path, &target);
+        } else {
+            fs::copy(&path, &target).expect("failed to copy CPython standard library file");
         }
     }
 }

@@ -6,12 +6,14 @@ import tempfile
 from collections import UserList
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
 from typing import Self
 
 from . import _core
 from .rpc import RpcHandler, RpcHost
+from .vfs import VirtualFileSystem
 
 __all__ = [
   "AddFuel",
@@ -24,6 +26,7 @@ __all__ = [
   "RuntimeResult",
   "RuntimeSetupError",
   "SetFuel",
+  "TerminationReason",
   "Worker",
   "WorkerCallOptions",
 ]
@@ -39,6 +42,18 @@ class RuntimeSetupError(RuntimeError):
 
 class RuntimeExecutionError(RuntimeError):
   """Raised when guest execution fails."""
+
+
+class TerminationReason(StrEnum):
+  COMPLETED = "completed"
+  GUEST_ERROR = "guest_error"
+  TIMEOUT = "timeout"
+  CANCELLED = "cancelled"
+  FUEL_EXHAUSTED = "fuel_exhausted"
+  OUTPUT_LIMIT = "output_limit"
+  MEMORY_LIMIT = "memory_limit"
+  RUNTIME_ERROR = "runtime_error"
+  INFRASTRUCTURE_ERROR = "infrastructure_error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +152,7 @@ class Output(UserList[OutputEvent]):
 class RuntimeResult:
   output: Output = field(default_factory=Output)
   error: str | None = None
+  reason: TerminationReason = TerminationReason.COMPLETED
 
   @property
   def stdout(self) -> bytes:
@@ -168,15 +184,23 @@ class PythonRuntime:
     self,
     *,
     max_ipc_frame_bytes: int = 50 * 1024 * 1024,
+    vfs: VirtualFileSystem | None = None,
+    cache_vfs: bool = False,
   ) -> None:
     if max_ipc_frame_bytes <= 0:
       raise ValueError("max_ipc_frame_bytes must be positive")
     self.max_ipc_frame_bytes = max_ipc_frame_bytes
+    self.vfs = vfs
+    self.cache_vfs = cache_vfs
     self.rpc = RpcHost(self._register_handler)
     self._sandbox: _core.SandboxProcess | None = None
     self._start_lock: asyncio.Lock | None = None
     self._socket_directory: tempfile.TemporaryDirectory[str] | None = None
     self._worker_ids = itertools.count(1)
+
+  @property
+  def is_open(self) -> bool:
+    return self._sandbox is not None and not self._sandbox.closed
 
   async def execute(
     self,
@@ -197,11 +221,20 @@ class PythonRuntime:
 
   async def close(self) -> None:
     sandbox, self._sandbox = self._sandbox, None
-    if sandbox is not None:
-      await sandbox.close()
-    if self._socket_directory is not None:
-      self._socket_directory.cleanup()
-      self._socket_directory = None
+    try:
+      if sandbox is not None:
+        await sandbox.close()
+    finally:
+      self._cleanup_socket_directory()
+
+  async def reopen(self) -> None:
+    await self.close()
+    await self._get_sandbox()
+
+  async def invalidate_vfs(self, path: str | None = None) -> None:
+    if not self.cache_vfs:
+      return
+    await (await self._get_sandbox()).invalidate_vfs(path)
 
   async def __aenter__(self) -> Self:
     await self._get_sandbox()
@@ -233,14 +266,19 @@ class PythonRuntime:
     )
 
   async def _get_sandbox(self) -> _core.SandboxProcess:
-    if self._sandbox is not None:
+    if self._sandbox is not None and not self._sandbox.closed:
       return self._sandbox
     if self._start_lock is None:
       self._start_lock = asyncio.Lock()
 
     async with self._start_lock:
-      if self._sandbox is not None:
+      if self._sandbox is not None and not self._sandbox.closed:
         return self._sandbox
+      stale, self._sandbox = self._sandbox, None
+      if stale is not None:
+        with suppress(Exception):
+          await stale.close()
+        self._cleanup_socket_directory()
       component, python_root = component_paths()
       self._socket_directory = tempfile.TemporaryDirectory(
         prefix="pysandbox-",
@@ -254,6 +292,7 @@ class PythonRuntime:
           python_root,
           executable_arguments=["-m", "pysandbox._sandboxd"],
           max_ipc_frame_bytes=self.max_ipc_frame_bytes,
+          cache_vfs=self.cache_vfs,
         )
       except BaseException as error:
         self._socket_directory.cleanup()
@@ -262,8 +301,15 @@ class PythonRuntime:
 
       for method, handler in self.rpc.handlers():
         sandbox.expose(method, handler)
+      if self.vfs is not None:
+        sandbox.set_vfs(self.vfs)
       self._sandbox = sandbox
       return sandbox
+
+  def _cleanup_socket_directory(self) -> None:
+    if self._socket_directory is not None:
+      self._socket_directory.cleanup()
+      self._socket_directory = None
 
   def _register_handler(self, method: str, handler: RpcHandler) -> None:
     if self._sandbox is not None:
@@ -386,6 +432,7 @@ class Worker:
         native_result = await execution.result()
         self.result.output = output_from_native(native_result.output)
         self.result.error = native_result.error
+        self.result.reason = TerminationReason(native_result.reason)
         return self.result
       except asyncio.CancelledError:
         with suppress(Exception):

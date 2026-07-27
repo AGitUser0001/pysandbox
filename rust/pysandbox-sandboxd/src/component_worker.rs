@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
+use eryx_vfs::{HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir, add_hybrid_vfs_to_linker};
 use pysandbox_protocol::{Frame, FrameKind, FuelOperation, RpcCall, encode_payload};
 use tokio::io::AsyncWrite;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
@@ -20,6 +21,8 @@ use wasmtime::{
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use crate::remote_vfs::RemoteVfs;
 
 const EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_FUEL_YIELD_INTERVAL: u64 = 10_000_000;
@@ -367,6 +370,18 @@ impl WorkerControl {
         self.send(ControlMessage::Close)
     }
 
+    pub fn was_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn timed_out(&self) -> bool {
+        self.state
+            .timeout_deadline
+            .lock()
+            .expect("worker deadline lock poisoned")
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
     pub fn worker_call(
         &self,
         request_id: u64,
@@ -478,6 +493,7 @@ struct ComponentState {
     program: String,
     table: ResourceTable,
     wasi: WasiCtx,
+    vfs: HybridVfsCtx<RemoteVfs>,
     limits: StoreLimits,
     control_queue: Arc<AsyncMutex<mpsc::UnboundedReceiver<ControlMessage>>>,
     execution_control: Arc<ExecutionControlState>,
@@ -563,6 +579,14 @@ impl WasiView for ComponentState {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+impl HybridVfsView for ComponentState {
+    type Storage = RemoteVfs;
+
+    fn hybrid_vfs(&mut self) -> HybridVfsState<'_, Self::Storage> {
+        HybridVfsState::new(&mut self.vfs, &mut self.table)
     }
 }
 
@@ -684,10 +708,20 @@ pub struct ComponentRuntime {
     engine: Engine,
     component: Component,
     linker: Arc<Linker<ComponentState>>,
+    vfs: RemoteVfs,
+    hybrid_filesystem: bool,
 }
 
 impl ComponentRuntime {
-    pub fn load(component_path: &Path) -> Result<Self> {
+    pub(crate) fn load(component_path: &Path, vfs: RemoteVfs) -> Result<Self> {
+        Self::load_with_filesystem(component_path, vfs, true)
+    }
+
+    fn load_with_filesystem(
+        component_path: &Path,
+        vfs: RemoteVfs,
+        hybrid_filesystem: bool,
+    ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model_async(true);
         config.consume_fuel(true);
@@ -705,6 +739,11 @@ impl ComponentRuntime {
         let component = Component::from_file(&engine, component_path)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+        if hybrid_filesystem {
+            linker.allow_shadowing(true);
+            add_hybrid_vfs_to_linker(&mut linker)?;
+            linker.allow_shadowing(false);
+        }
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         pysandbox::python::host::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
 
@@ -712,6 +751,8 @@ impl ComponentRuntime {
             engine,
             component,
             linker: Arc::new(linker),
+            vfs,
+            hybrid_filesystem,
         })
     }
 }
@@ -724,26 +765,50 @@ impl ComponentWorker {
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
     ) -> Result<Self> {
+        Self::load_with_python_permissions(
+            runtime,
+            python_root,
+            rpc,
+            control,
+            control_receiver,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .await
+    }
+
+    async fn load_with_python_permissions(
+        runtime: &ComponentRuntime,
+        python_root: &Path,
+        rpc: RpcBridge,
+        control: WorkerControl,
+        control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
+        python_dir_perms: DirPerms,
+        python_file_perms: FilePerms,
+    ) -> Result<Self> {
         let engine = runtime.engine.clone();
         let output = control.output.clone();
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder
-            .stdout(CapturedOutputStream {
-                output: output.clone(),
-                source: OutputSource::Stdout,
-            })
-            .stderr(CapturedOutputStream {
-                output: output.clone(),
-                source: OutputSource::Stderr,
-            })
-            .preopened_dir(python_root, "/python", DirPerms::READ, FilePerms::READ)?;
-        let wasi = wasi_builder.build();
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.stdout(CapturedOutputStream {
+            output: output.clone(),
+            source: OutputSource::Stdout,
+        })
+        .stderr(CapturedOutputStream {
+            output: output.clone(),
+            source: OutputSource::Stderr,
+        });
+        if !runtime.hybrid_filesystem {
+            wasi.preopened_dir(python_root, "/python", python_dir_perms, python_file_perms)?;
+        }
+        let wasi = wasi.build();
+        let vfs = python_vfs(runtime, python_root, python_dir_perms, python_file_perms)?;
         let mut store = Store::new(
             &engine,
             ComponentState {
                 program: String::new(),
                 table: ResourceTable::new(),
                 wasi,
+                vfs,
                 limits: StoreLimitsBuilder::new().build(),
                 control_queue: Arc::new(AsyncMutex::new(control_receiver)),
                 execution_control: control.state.clone(),
@@ -839,6 +904,107 @@ impl ComponentWorker {
         self.store.set_epoch_deadline(1);
         Ok(())
     }
+}
+
+pub async fn compile_python_root(component_path: &Path, python_root: &Path) -> Result<()> {
+    let mut files = Vec::new();
+    collect_python_files(python_root, python_root, &mut files)?;
+    let mut program = String::from(
+        "import sys\nsys.dont_write_bytecode = True\nimport py_compile\nfor path in (\n",
+    );
+    for file in files {
+        program.push_str(&format!("  {file:?},\n"));
+    }
+    program.push_str("):\n  py_compile.compile(path, doraise=True)\n");
+
+    let (result, output) = run_build_program(component_path, python_root, program).await?;
+    result.map_err(|error| {
+        let output = output
+            .into_iter()
+            .map(|event| String::from_utf8_lossy(&event.data).into_owned())
+            .collect::<String>();
+        anyhow!("failed to compile Python standard library: {error}\n{output}")
+    })
+}
+
+async fn run_build_program(
+    component_path: &Path,
+    python_root: &Path,
+    program: String,
+) -> Result<(std::result::Result<(), String>, Vec<OutputEvent>)> {
+    let (outgoing, _outgoing_receiver) = mpsc::channel(1);
+    let pending_guest_calls = Arc::new(AsyncMutex::new(std::collections::HashMap::new()));
+    let pending_vfs_requests = Arc::new(AsyncMutex::new(std::collections::HashMap::new()));
+    let next_request_id = Arc::new(AtomicU64::new(1));
+    let vfs = RemoteVfs::new(
+        outgoing.clone(),
+        next_request_id.clone(),
+        pending_vfs_requests,
+        crate::remote_vfs::CachePolicy::None,
+    );
+    let runtime = ComponentRuntime::load_with_filesystem(component_path, vfs, false)?;
+    let (control, control_receiver) = WorkerControl::new();
+    let rpc = RpcBridge::new(0, outgoing, next_request_id, pending_guest_calls);
+    let mut worker = ComponentWorker::load_with_python_permissions(
+        &runtime,
+        python_root,
+        rpc,
+        control,
+        control_receiver,
+        DirPerms::all(),
+        FilePerms::all(),
+    )
+    .await?;
+    let (output_sender, _output_receiver) = mpsc::unbounded_channel();
+    let result = worker
+        .run(
+            0,
+            program,
+            ExecutionLimits {
+                max_memory_bytes: 512 * 1024 * 1024,
+                max_output_bytes: 1024 * 1024,
+                max_guest_rpc_bytes: 1,
+                fuel: u64::MAX,
+                timeout: Some(Duration::from_secs(120)),
+            },
+            output_sender,
+        )
+        .await?;
+    Ok((result, worker.output().events()))
+}
+
+fn collect_python_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_python_files(root, &path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "py") {
+            files.push(format!(
+                "/python/{}",
+                path.strip_prefix(root)?
+                    .to_str()
+                    .ok_or_else(|| anyhow!("Python source path is not UTF-8"))?
+                    .replace('\\', "/")
+            ));
+        }
+    }
+    files.sort();
+    Ok(())
+}
+
+fn python_vfs(
+    runtime: &ComponentRuntime,
+    python_root: &Path,
+    dir_perms: DirPerms,
+    file_perms: FilePerms,
+) -> Result<HybridVfsCtx<RemoteVfs>> {
+    let mut vfs = HybridVfsCtx::new(runtime.vfs.clone());
+    vfs.allow_blocking_current_thread(true);
+    vfs.add_vfs_preopen("/", DirPerms::READ, FilePerms::READ);
+    let mut python = RealDir::open_ambient(python_root, dir_perms, file_perms)?;
+    python.allow_blocking = true;
+    vfs.add_real_preopen("/python", python);
+    Ok(vfs)
 }
 
 fn apply_pending_store_updates(

@@ -5,16 +5,17 @@ from . import _core
 
 
 def main() -> None:
-  if len(sys.argv) != 5:
+  if len(sys.argv) != 6:
     raise SystemExit(
       "usage: python -m pysandbox._sandboxd "
-      "<socket-name> <component> <python-root> <max-ipc-frame-bytes>"
+      "<socket-name> <component> <python-root> <max-ipc-frame-bytes> <cache-vfs>"
     )
   _core.run_sandboxd(
     sys.argv[1],
     Path(sys.argv[2]),
     Path(sys.argv[3]),
     int(sys.argv[4]),
+    sys.argv[5] == "true",
   )
 
 

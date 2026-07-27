@@ -1,11 +1,14 @@
 import ast
 import inspect
+import sys
 import traceback
 
 import cbor2
 import wit_world
 from componentize_py_types import Err
 from wit_world.imports import host
+
+sys.dont_write_bytecode = True
 
 
 async def spin(namespace: dict[str, object]) -> None:

@@ -9,8 +9,8 @@ use interprocess::local_socket::{
 };
 use pysandbox_protocol::{
     CancelRequest, ControlResult, ExecuteRequest, ExecuteResult, ExecutionControl, Frame,
-    FrameKind, OutputPayload, RpcResult, WorkerRpcCall, decode_payload, encode_payload, read_frame,
-    write_frame,
+    FrameKind, InvalidateVfs, OutputPayload, RpcResult, TerminationReason, VfsResponse,
+    WorkerRpcCall, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -18,12 +18,14 @@ use crate::component_worker::{
     ComponentRuntime, ComponentWorker, ExecutionLimits, OutputEvent, OutputSource,
     PendingGuestCalls, RpcBridge,
 };
+use crate::remote_vfs::{CachePolicy, PendingVfsRequests, RemoteVfs};
 
 pub async fn serve(
     socket_name: &str,
     component_path: &Path,
     python_root: &Path,
     max_ipc_frame_bytes: usize,
+    cache_vfs: bool,
 ) -> anyhow::Result<()> {
     let name = if GenericNamespaced::is_supported() {
         socket_name.to_ns_name::<GenericNamespaced>()?
@@ -40,6 +42,7 @@ pub async fn serve(
         component_path.to_owned(),
         python_root.to_owned(),
         max_ipc_frame_bytes,
+        cache_vfs,
     )
     .await
 }
@@ -49,9 +52,9 @@ async fn serve_connection(
     component_path: PathBuf,
     python_root: PathBuf,
     max_ipc_frame_bytes: usize,
+    cache_vfs: bool,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = connection.split();
-    let runtime = ComponentRuntime::load(&component_path)?;
     let (outgoing, mut outgoing_receiver) = mpsc::channel::<Frame>(256);
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = outgoing_receiver.recv().await {
@@ -62,6 +65,18 @@ async fn serve_connection(
     let mut workers = HashMap::<u64, WorkerHandle>::new();
     let pending_guest_calls: PendingGuestCalls = Arc::new(Mutex::new(HashMap::new()));
     let next_guest_call_id = Arc::new(AtomicU64::new(1 << 63));
+    let pending_vfs_requests: PendingVfsRequests = Arc::new(Mutex::new(HashMap::new()));
+    let vfs = RemoteVfs::new(
+        outgoing.clone(),
+        next_guest_call_id.clone(),
+        pending_vfs_requests,
+        if cache_vfs {
+            CachePolicy::Invalidated
+        } else {
+            CachePolicy::None
+        },
+    );
+    let runtime = ComponentRuntime::load(&component_path, vfs.clone())?;
 
     loop {
         let frame = read_frame(&mut reader, max_ipc_frame_bytes).await?;
@@ -177,6 +192,41 @@ async fn serve_connection(
                 };
                 let _ = waiter.send(result);
             }
+            FrameKind::VfsResponse => match decode_payload::<VfsResponse>(&frame.payload) {
+                Ok(response) => vfs.accept_response(frame.request_id, response).await,
+                Err(error) => {
+                    vfs.accept_response(
+                        frame.request_id,
+                        VfsResponse {
+                            value: None,
+                            error: Some(pysandbox_protocol::VfsError {
+                                code: pysandbox_protocol::VfsErrorCode::Io,
+                                message: error.to_string(),
+                            }),
+                        },
+                    )
+                    .await;
+                }
+            },
+            FrameKind::InvalidateVfs => {
+                let result = decode_payload::<InvalidateVfs>(&frame.payload);
+                match result {
+                    Ok(request) => {
+                        vfs.invalidate(request.path.as_deref()).await;
+                        send_control_result(&outgoing, frame.worker_id, frame.request_id, None)
+                            .await?;
+                    }
+                    Err(error) => {
+                        send_control_result(
+                            &outgoing,
+                            frame.worker_id,
+                            frame.request_id,
+                            Some(error.to_string()),
+                        )
+                        .await?;
+                    }
+                }
+            }
             FrameKind::WorkerCall => {
                 let result = decode_payload::<WorkerRpcCall>(&frame.payload)
                     .map_err(anyhow::Error::from)
@@ -202,6 +252,8 @@ async fn serve_connection(
                     let _ = worker.control.close();
                 }
                 workers.clear();
+                drop(runtime);
+                drop(vfs);
                 drop(outgoing);
                 writer_task.await??;
                 return Ok(());
@@ -268,6 +320,7 @@ fn spawn_worker(
                         worker_id,
                         request_id,
                         Some(error.to_string()),
+                        TerminationReason::InfrastructureError,
                     )
                     .await;
                 }
@@ -299,8 +352,14 @@ async fn execute(
     let limits = match execution_limits(request.limits) {
         Ok(limits) => limits,
         Err(error) => {
-            let _ =
-                send_execute_result(outgoing, worker_id, request_id, Some(error.to_string())).await;
+            let _ = send_execute_result(
+                outgoing,
+                worker_id,
+                request_id,
+                Some(error.to_string()),
+                TerminationReason::InfrastructureError,
+            )
+            .await;
             return;
         }
     };
@@ -328,13 +387,29 @@ async fn execute(
     let result = worker
         .run(request_id, request.program, limits, output_sender)
         .await;
-    let error = match result {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error),
-        Err(error) => Some(error.to_string()),
+    let (error, reason) = match result {
+        Ok(Ok(())) => (None, TerminationReason::Completed),
+        Ok(Err(error)) => (Some(error), TerminationReason::GuestError),
+        Err(error) => {
+            let message = error.to_string();
+            let reason = if worker.control().was_cancelled() {
+                TerminationReason::Cancelled
+            } else if worker.control().timed_out() {
+                TerminationReason::Timeout
+            } else if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+                TerminationReason::FuelExhausted
+            } else if message.contains("guest output exceeded") {
+                TerminationReason::OutputLimit
+            } else if message.contains("memory") && message.contains("limit") {
+                TerminationReason::MemoryLimit
+            } else {
+                TerminationReason::RuntimeError
+            };
+            (Some(message), reason)
+        }
     };
     let _ = output_task.await;
-    let _ = send_execute_result(outgoing, worker_id, request_id, error).await;
+    let _ = send_execute_result(outgoing, worker_id, request_id, error, reason).await;
 }
 
 async fn apply_control(
@@ -417,13 +492,14 @@ async fn send_execute_result(
     worker_id: u64,
     request_id: u64,
     error: Option<String>,
+    reason: TerminationReason,
 ) -> anyhow::Result<()> {
     outgoing
         .send(Frame::new(
             FrameKind::ExecuteResult,
             worker_id,
             request_id,
-            encode_payload(&ExecuteResult { error })?,
+            encode_payload(&ExecuteResult { error, reason })?,
         ))
         .await?;
     Ok(())

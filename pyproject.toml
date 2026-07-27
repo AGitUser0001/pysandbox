@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox"
-version = "0.4.7.2"
+version = "0.99a1"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,6 +30,9 @@ include = [
     { path = "component/**/*", format = "sdist" },
     { path = "vendor/cbor2/cbor2/**/*", format = "sdist" },
     { path = "vendor/cbor2/pyproject.toml", format = "sdist" },
+    { path = "vendor/cpython/Lib/**/*", format = "sdist" },
+    { path = "vendor/cpython/LICENSE", format = "sdist" },
+    { path = "vendor/eryx-vfs/**/*", format = "sdist" },
 ]
 
 [tool.pyright]
@@ -39,14 +42,18 @@ typeCheckingMode = "standard"
 exclude = [
     ".venv",
     "component",
+    "pysandbox/_runtime",
     "target",
     "tmp",
     "vendor",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
 ]
 
 [tool.ruff]
 indent-width = 2
-extend-exclude = ["vendor"]
+extend-exclude = ["pysandbox/_runtime", "vendor"]
 
 [tool.ruff.format]
 quote-style = "preserve"

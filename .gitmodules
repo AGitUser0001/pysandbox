@@ -1,3 +1,7 @@
 [submodule "vendor/cbor2"]
 	path = vendor/cbor2
 	url = https://github.com/agronholm/cbor2.git
+[submodule "vendor/cpython"]
+	path = vendor/cpython
+	url = https://github.com/dicej/cpython.git
+	branch = v3.14.0-wasi-sdk-30
