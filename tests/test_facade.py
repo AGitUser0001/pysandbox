@@ -7,6 +7,7 @@ from pysandbox import (
   PythonRuntime,
   RuntimeExecutionError,
   RuntimeLimits,
+  RuntimeResult,
   TerminationReason,
   WorkerCallOptions,
 )
@@ -18,6 +19,8 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       PythonRuntime(worker_queue_capacity=0)
     with self.assertRaisesRegex(ValueError, "host_dispatch_concurrency"):
       PythonRuntime(host_dispatch_concurrency=0)
+    with self.assertRaisesRegex(ValueError, "host_dispatch_queue_capacity"):
+      PythonRuntime(host_dispatch_queue_capacity=0)
 
   async def test_execution_rpc_worker_and_output(self) -> None:
     runtime = PythonRuntime()
@@ -164,6 +167,56 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(maximum_active, 2)
     finally:
       release.set()
+      await runtime.close()
+
+  async def test_host_dispatch_overload_does_not_block_connection(self) -> None:
+    runtime = PythonRuntime(
+      host_dispatch_concurrency=1,
+      host_dispatch_queue_capacity=1,
+    )
+    first_started = asyncio.Event()
+    make_worker_call = asyncio.Event()
+    worker_call_finished = asyncio.Event()
+    release = asyncio.Event()
+    target = runtime.run("def ping():\n  return 'pong'\n")
+    first: asyncio.Task[RuntimeResult] | None = None
+    second: asyncio.Task[RuntimeResult] | None = None
+
+    @runtime.rpc.expose
+    async def saturated_call(name: str) -> str:
+      if name == "first":
+        first_started.set()
+        await make_worker_call.wait()
+        self.assertEqual(await target.call(("ping",), None), "pong")
+        worker_call_finished.set()
+        await release.wait()
+      return name
+
+    try:
+      self.assertEqual(await target.call(("ping",), None), "pong")
+      first = asyncio.create_task(runtime.execute("await saturated_call('first')"))
+      await asyncio.wait_for(first_started.wait(), timeout=5)
+
+      second = asyncio.create_task(runtime.execute("await saturated_call('second')"))
+      await asyncio.sleep(0.05)
+      overloaded = await asyncio.wait_for(
+        runtime.execute("await saturated_call('third')"),
+        timeout=2,
+      )
+      self.assertIn("host dispatch queue is full", overloaded.error or "")
+
+      make_worker_call.set()
+      await asyncio.wait_for(worker_call_finished.wait(), timeout=2)
+      release.set()
+      results = await asyncio.gather(first, second)
+      self.assertTrue(all(result.error is None for result in results))
+    finally:
+      make_worker_call.set()
+      release.set()
+      pending = [task for task in (first, second) if task is not None]
+      if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+      await target.close()
       await runtime.close()
 
   async def test_worker_call_queue_overload(self) -> None:

@@ -372,6 +372,7 @@ impl SandboxProcess {
     max_ipc_frame_bytes = DEFAULT_MAX_FRAME_BYTES,
     worker_queue_capacity = 256,
     host_dispatch_concurrency = 64,
+    host_dispatch_queue_capacity = 256,
     cache_vfs = false,
 ))]
 fn start_sandbox<'py>(
@@ -384,6 +385,7 @@ fn start_sandbox<'py>(
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
     host_dispatch_concurrency: usize,
+    host_dispatch_queue_capacity: usize,
     cache_vfs: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if worker_queue_capacity == 0 {
@@ -394,6 +396,11 @@ fn start_sandbox<'py>(
     if host_dispatch_concurrency == 0 {
         return Err(PyValueError::new_err(
             "host_dispatch_concurrency must be positive",
+        ));
+    }
+    if host_dispatch_queue_capacity == 0 {
+        return Err(PyValueError::new_err(
+            "host_dispatch_queue_capacity must be positive",
         ));
     }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -409,30 +416,22 @@ fn start_sandbox<'py>(
             .spawn()
             .map_err(runtime_error)?;
         let connection = connect_to_sandbox(&mut child, &socket_name).await?;
-        let (guest_calls, guest_call_receiver) = mpsc::channel(64);
-        let (vfs_requests, vfs_request_receiver) = mpsc::channel(64);
+        let (host_dispatch, host_dispatch_receiver) = mpsc::channel(host_dispatch_queue_capacity);
         let closed = Arc::new(AtomicBool::new(false));
         let (requests, shutdown) = spawn_connection_actor(
             connection,
-            guest_calls,
-            vfs_requests,
+            host_dispatch,
             max_ipc_frame_bytes,
             closed.clone(),
         );
         let rpc_handlers = Arc::new(StdMutex::new(HashMap::new()));
         let vfs_handler = Arc::new(StdMutex::new(None));
-        let host_dispatch = Arc::new(Semaphore::new(host_dispatch_concurrency));
-        spawn_guest_call_dispatcher(
-            guest_call_receiver,
+        spawn_host_dispatcher(
+            host_dispatch_receiver,
             requests.clone(),
             rpc_handlers.clone(),
-            host_dispatch.clone(),
-        );
-        spawn_vfs_dispatcher(
-            vfs_request_receiver,
-            requests.clone(),
             vfs_handler.clone(),
-            host_dispatch,
+            Arc::new(Semaphore::new(host_dispatch_concurrency)),
         );
 
         Python::attach(|py| {
@@ -471,10 +470,14 @@ struct ConnectionResponse {
 
 type SharedOutput = Arc<StdMutex<Vec<OutputPayload>>>;
 
+enum HostDispatchRequest {
+    GuestCall(Frame),
+    Vfs(Frame),
+}
+
 fn spawn_connection_actor(
     connection: Stream,
-    guest_calls: mpsc::Sender<Frame>,
-    vfs_requests: mpsc::Sender<Frame>,
+    host_dispatch: mpsc::Sender<HostDispatchRequest>,
     max_ipc_frame_bytes: usize,
     closed: Arc<AtomicBool>,
 ) -> (mpsc::Sender<ConnectionRequest>, watch::Sender<bool>) {
@@ -592,24 +595,26 @@ fn spawn_connection_actor(
                             continue;
                         }
 
-                        if frame.kind == FrameKind::GuestCall {
-                            if guest_calls.send(frame).await.is_err() {
-                                fail_pending_requests(
-                                    &mut pending,
-                                    "guest RPC dispatcher stopped".into(),
-                                );
-                                return;
-                            }
-                            continue;
-                        }
-
-                        if frame.kind == FrameKind::VfsRequest {
-                            if vfs_requests.send(frame).await.is_err() {
-                                fail_pending_requests(
-                                    &mut pending,
-                                    "VFS dispatcher stopped".into(),
-                                );
-                                return;
+                        if matches!(frame.kind, FrameKind::GuestCall | FrameKind::VfsRequest) {
+                            let request = if frame.kind == FrameKind::GuestCall {
+                                HostDispatchRequest::GuestCall(frame)
+                            } else {
+                                HostDispatchRequest::Vfs(frame)
+                            };
+                            if let Err(error) = host_dispatch.try_send(request) {
+                                let (request, message) = match error {
+                                    mpsc::error::TrySendError::Full(request) => {
+                                        (request, "host dispatch queue is full")
+                                    }
+                                    mpsc::error::TrySendError::Closed(request) => {
+                                        (request, "host dispatcher stopped")
+                                    }
+                                };
+                                let response = host_dispatch_error_response(request, message);
+                                if let Err(error) = write_frame(&mut writer, &response).await {
+                                    fail_pending_requests(&mut pending, error.to_string());
+                                    return;
+                                }
                             }
                             continue;
                         }
@@ -643,102 +648,137 @@ fn spawn_connection_actor(
     (requests, shutdown)
 }
 
-fn spawn_guest_call_dispatcher(
-    mut guest_calls: mpsc::Receiver<Frame>,
+fn spawn_host_dispatcher(
+    mut host_dispatch_requests: mpsc::Receiver<HostDispatchRequest>,
     requests: mpsc::Sender<ConnectionRequest>,
     handlers: RpcHandlers,
+    handler: VfsHandler,
     host_dispatch: Arc<Semaphore>,
 ) {
     pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-        while let Some(frame) = guest_calls.recv().await {
+        loop {
             let Ok(permit) = host_dispatch.clone().acquire_owned().await else {
+                return;
+            };
+            let Some(dispatch_request) = host_dispatch_requests.recv().await else {
                 return;
             };
             let requests = requests.clone();
             let handlers = handlers.clone();
+            let handler = handler.clone();
             pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                 let _permit = permit;
-                let result = match decode_payload::<RpcCall>(&frame.payload) {
-                    Ok(call) => invoke_rpc_handler(&handlers, call).await,
-                    Err(error) => Err(error.to_string()),
-                };
-                let response = match result {
-                    Ok(value) => RpcResult { value, error: None },
-                    Err(error) => RpcResult {
-                        value: Vec::new(),
-                        error: Some(error),
-                    },
-                };
-                let Ok(payload) = encode_payload(&response) else {
-                    return;
-                };
-                let _ = request(
-                    &requests,
-                    Frame::new(
-                        FrameKind::GuestResponse,
-                        frame.worker_id,
-                        frame.request_id,
-                        payload,
-                    ),
-                    None,
-                )
-                .await;
+                match dispatch_request {
+                    HostDispatchRequest::GuestCall(frame) => {
+                        dispatch_guest_call(frame, &requests, &handlers).await;
+                    }
+                    HostDispatchRequest::Vfs(frame) => {
+                        dispatch_vfs_request(frame, &requests, &handler).await;
+                    }
+                }
             });
         }
     });
 }
 
-fn spawn_vfs_dispatcher(
-    mut vfs_requests: mpsc::Receiver<Frame>,
-    requests: mpsc::Sender<ConnectionRequest>,
-    handler: VfsHandler,
-    host_dispatch: Arc<Semaphore>,
+async fn dispatch_guest_call(
+    frame: Frame,
+    requests: &mpsc::Sender<ConnectionRequest>,
+    handlers: &RpcHandlers,
 ) {
-    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-        while let Some(frame) = vfs_requests.recv().await {
-            let Ok(permit) = host_dispatch.clone().acquire_owned().await else {
-                return;
-            };
-            let requests = requests.clone();
-            let handler = handler.clone();
-            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-                let _permit = permit;
-                let response = match decode_payload::<VfsRequest>(&frame.payload) {
-                    Ok(call) => match invoke_vfs_handler(&handler, call).await {
-                        Ok(value) => VfsResponse {
-                            value: Some(value),
-                            error: None,
-                        },
-                        Err(error) => VfsResponse {
-                            value: None,
-                            error: Some(error),
-                        },
-                    },
-                    Err(error) => VfsResponse {
-                        value: None,
-                        error: Some(VfsError {
-                            code: VfsErrorCode::Invalid,
-                            message: error.to_string(),
-                        }),
-                    },
-                };
-                let Ok(payload) = encode_payload(&response) else {
-                    return;
-                };
-                let _ = request(
-                    &requests,
-                    Frame::new(
-                        FrameKind::VfsResponse,
-                        frame.worker_id,
-                        frame.request_id,
-                        payload,
-                    ),
-                    None,
-                )
-                .await;
-            });
-        }
-    });
+    let result = match decode_payload::<RpcCall>(&frame.payload) {
+        Ok(call) => invoke_rpc_handler(handlers, call).await,
+        Err(error) => Err(error.to_string()),
+    };
+    let response = match result {
+        Ok(value) => RpcResult { value, error: None },
+        Err(error) => RpcResult {
+            value: Vec::new(),
+            error: Some(error),
+        },
+    };
+    let Ok(payload) = encode_payload(&response) else {
+        return;
+    };
+    let _ = request(
+        requests,
+        Frame::new(
+            FrameKind::GuestResponse,
+            frame.worker_id,
+            frame.request_id,
+            payload,
+        ),
+        None,
+    )
+    .await;
+}
+
+async fn dispatch_vfs_request(
+    frame: Frame,
+    requests: &mpsc::Sender<ConnectionRequest>,
+    handler: &VfsHandler,
+) {
+    let response = match decode_payload::<VfsRequest>(&frame.payload) {
+        Ok(call) => match invoke_vfs_handler(handler, call).await {
+            Ok(value) => VfsResponse {
+                value: Some(value),
+                error: None,
+            },
+            Err(error) => VfsResponse {
+                value: None,
+                error: Some(error),
+            },
+        },
+        Err(error) => VfsResponse {
+            value: None,
+            error: Some(VfsError {
+                code: VfsErrorCode::Invalid,
+                message: error.to_string(),
+            }),
+        },
+    };
+    let Ok(payload) = encode_payload(&response) else {
+        return;
+    };
+    let _ = request(
+        requests,
+        Frame::new(
+            FrameKind::VfsResponse,
+            frame.worker_id,
+            frame.request_id,
+            payload,
+        ),
+        None,
+    )
+    .await;
+}
+
+fn host_dispatch_error_response(request: HostDispatchRequest, message: &str) -> Frame {
+    match request {
+        HostDispatchRequest::GuestCall(frame) => Frame::new(
+            FrameKind::GuestResponse,
+            frame.worker_id,
+            frame.request_id,
+            encode_payload(&RpcResult {
+                value: Vec::new(),
+                error: Some(message.into()),
+            })
+            .expect("RPC overload response must encode"),
+        ),
+        HostDispatchRequest::Vfs(frame) => Frame::new(
+            FrameKind::VfsResponse,
+            frame.worker_id,
+            frame.request_id,
+            encode_payload(&VfsResponse {
+                value: None,
+                error: Some(VfsError {
+                    code: VfsErrorCode::Io,
+                    message: message.into(),
+                }),
+            })
+            .expect("VFS overload response must encode"),
+        ),
+    }
 }
 
 async fn invoke_vfs_handler(

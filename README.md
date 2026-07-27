@@ -161,6 +161,10 @@ callbacks actively dispatched into the host Python application:
 runtime = PythonRuntime(host_dispatch_concurrency=64)
 ```
 
+`host_dispatch_queue_capacity` separately bounds pending host operations.
+When that queue is full, guest RPC and VFS operations receive an immediate
+overload error while connection routing remains responsive.
+
 ## Internals
 
 - A PyO3 extension supervises a Rust sandbox subprocess without blocking the

@@ -99,5 +99,6 @@ def start_sandbox(
   max_ipc_frame_bytes: int = 50 * 1024 * 1024,
   worker_queue_capacity: int = 256,
   host_dispatch_concurrency: int = 64,
+  host_dispatch_queue_capacity: int = 256,
   cache_vfs: bool = False,
 ) -> Awaitable[SandboxProcess]: ...
