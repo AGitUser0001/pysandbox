@@ -42,6 +42,17 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         })
         .transpose()?
         .unwrap_or(false);
+    let cache_vfs_negative = arguments
+        .next()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!(usage()))?
+                .parse()
+                .map_err(anyhow::Error::from)
+        })
+        .transpose()?
+        .unwrap_or(false);
     if arguments.next().is_some() {
         bail!(usage());
     }
@@ -53,11 +64,12 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         max_ipc_frame_bytes,
         worker_queue_capacity,
         cache_vfs,
+        cache_vfs_negative,
     )
     .await
 }
 
 fn usage() -> &'static str {
     "usage: pysandbox-sandboxd <socket-name> <component> <python-root> \
-     <max-ipc-frame-bytes> <worker-queue-capacity> [cache-vfs]"
+     <max-ipc-frame-bytes> <worker-queue-capacity> [cache-vfs] [cache-vfs-negative]"
 }

@@ -10,6 +10,7 @@ def run_sandboxd(
   max_ipc_frame_bytes: int,
   worker_queue_capacity: int,
   cache_vfs: bool,
+  cache_vfs_negative: bool,
 ) -> None: ...
 
 class SandboxProcess:
@@ -101,4 +102,5 @@ def start_sandbox(
   host_dispatch_concurrency: int = 64,
   host_dispatch_queue_capacity: int = 256,
   cache_vfs: bool = False,
+  cache_vfs_negative: bool = False,
 ) -> Awaitable[SandboxProcess]: ...

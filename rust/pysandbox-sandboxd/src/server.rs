@@ -27,6 +27,7 @@ pub async fn serve(
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
     cache_vfs: bool,
+    cache_vfs_negative: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         worker_queue_capacity > 0,
@@ -49,6 +50,7 @@ pub async fn serve(
         max_ipc_frame_bytes,
         worker_queue_capacity,
         cache_vfs,
+        cache_vfs_negative,
     )
     .await
 }
@@ -60,6 +62,7 @@ async fn serve_connection(
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
     cache_vfs: bool,
+    cache_vfs_negative: bool,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = connection.split();
     let (outgoing, mut outgoing_receiver) = mpsc::channel::<Frame>(256);
@@ -78,7 +81,9 @@ async fn serve_connection(
         next_guest_call_id.clone(),
         pending_vfs_requests,
         if cache_vfs {
-            CachePolicy::Invalidated
+            CachePolicy::Invalidated {
+                negative: cache_vfs_negative,
+            }
         } else {
             CachePolicy::None
         },

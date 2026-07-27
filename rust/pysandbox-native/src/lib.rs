@@ -48,6 +48,7 @@ fn run_sandboxd(
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
     cache_vfs: bool,
+    cache_vfs_negative: bool,
 ) -> PyResult<()> {
     py.detach(move || {
         let runtime = tokio::runtime::Runtime::new().map_err(runtime_error)?;
@@ -59,6 +60,7 @@ fn run_sandboxd(
                 max_ipc_frame_bytes,
                 worker_queue_capacity,
                 cache_vfs,
+                cache_vfs_negative,
             ))
             .map_err(runtime_error)
     })
@@ -374,6 +376,7 @@ impl SandboxProcess {
     host_dispatch_concurrency = 64,
     host_dispatch_queue_capacity = 256,
     cache_vfs = false,
+    cache_vfs_negative = false,
 ))]
 fn start_sandbox<'py>(
     py: Python<'py>,
@@ -387,6 +390,7 @@ fn start_sandbox<'py>(
     host_dispatch_concurrency: usize,
     host_dispatch_queue_capacity: usize,
     cache_vfs: bool,
+    cache_vfs_negative: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if worker_queue_capacity == 0 {
         return Err(PyValueError::new_err(
@@ -412,6 +416,7 @@ fn start_sandbox<'py>(
             .arg(max_ipc_frame_bytes.to_string())
             .arg(worker_queue_capacity.to_string())
             .arg(cache_vfs.to_string())
+            .arg(cache_vfs_negative.to_string())
             .kill_on_drop(true)
             .spawn()
             .map_err(runtime_error)?;

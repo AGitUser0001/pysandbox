@@ -189,6 +189,7 @@ class PythonRuntime:
     host_dispatch_queue_capacity: int = 256,
     vfs: VirtualFileSystem | None = None,
     cache_vfs: bool = False,
+    cache_vfs_negative: bool = False,
   ) -> None:
     if max_ipc_frame_bytes <= 0:
       raise ValueError("max_ipc_frame_bytes must be positive")
@@ -204,6 +205,7 @@ class PythonRuntime:
     self.host_dispatch_queue_capacity = host_dispatch_queue_capacity
     self.vfs = vfs
     self.cache_vfs = cache_vfs
+    self.cache_vfs_negative = cache_vfs_negative
     self.rpc = RpcHost(self._register_handler)
     self._sandbox: _core.SandboxProcess | None = None
     self._start_lock: asyncio.Lock | None = None
@@ -308,6 +310,7 @@ class PythonRuntime:
           host_dispatch_concurrency=self.host_dispatch_concurrency,
           host_dispatch_queue_capacity=self.host_dispatch_queue_capacity,
           cache_vfs=self.cache_vfs,
+          cache_vfs_negative=self.cache_vfs_negative,
         )
       except BaseException as error:
         self._socket_directory.cleanup()

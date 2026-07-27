@@ -15,7 +15,7 @@ pub(crate) type PendingVfsRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<VfsR
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CachePolicy {
     None,
-    Invalidated,
+    Invalidated { negative: bool },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -77,7 +77,7 @@ impl RemoteVfs {
     }
 
     async fn request(&self, key: CacheKey, request: VfsRequest) -> VfsResult<VfsValue> {
-        if self.policy == CachePolicy::Invalidated
+        if matches!(self.policy, CachePolicy::Invalidated { .. })
             && let Some(response) = self.cache.lock().await.get(&key).cloned()
         {
             return response_value(response);
@@ -102,12 +102,23 @@ impl RemoteVfs {
         let response = receiver
             .await
             .map_err(|_| VfsError::Io("VFS response channel was closed".into()))?;
-        if self.policy == CachePolicy::Invalidated
+        if response_is_cacheable(self.policy, &response)
             && generation == self.generation.load(Ordering::Acquire)
         {
             self.cache.lock().await.insert(key, response.clone());
         }
         response_value(response)
+    }
+}
+
+fn response_is_cacheable(policy: CachePolicy, response: &VfsResponse) -> bool {
+    match (&response.value, &response.error) {
+        (Some(_), None) => matches!(policy, CachePolicy::Invalidated { .. }),
+        (None, Some(error)) => {
+            matches!(policy, CachePolicy::Invalidated { negative: true })
+                && !matches!(error.code, VfsErrorCode::Io)
+        }
+        _ => false,
     }
 }
 
@@ -279,4 +290,51 @@ fn parent_path(path: &str) -> String {
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use pysandbox_protocol::{VfsError as ProtocolVfsError, VfsMetadata, VfsNodeKind};
+
+    use super::*;
+
+    fn error(code: VfsErrorCode) -> VfsResponse {
+        VfsResponse {
+            value: None,
+            error: Some(ProtocolVfsError {
+                code,
+                message: "test".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn cache_policy_never_caches_io_or_malformed_responses() {
+        let successes = VfsResponse {
+            value: Some(VfsValue::Metadata(VfsMetadata {
+                kind: VfsNodeKind::File,
+                size: 1,
+            })),
+            error: None,
+        };
+        let malformed = VfsResponse {
+            value: None,
+            error: None,
+        };
+        let positive_only = CachePolicy::Invalidated { negative: false };
+        let with_negative = CachePolicy::Invalidated { negative: true };
+
+        assert!(response_is_cacheable(positive_only, &successes));
+        assert!(!response_is_cacheable(positive_only, &error(VfsErrorCode::NotFound)));
+        assert!(response_is_cacheable(
+            with_negative,
+            &error(VfsErrorCode::NotFound)
+        ));
+        assert!(!response_is_cacheable(
+            with_negative,
+            &error(VfsErrorCode::Io)
+        ));
+        assert!(!response_is_cacheable(with_negative, &malformed));
+        assert!(!response_is_cacheable(CachePolicy::None, &successes));
+    }
 }

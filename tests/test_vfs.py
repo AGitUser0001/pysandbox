@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,6 +6,7 @@ from tempfile import TemporaryDirectory
 from pysandbox import (
   PythonRuntime,
   RuntimeLimits,
+  RuntimeResult,
   VfsDirectoryEntry,
   VfsMetadata,
 )
@@ -13,6 +15,7 @@ from pysandbox import (
 class MemoryVfs:
   def __init__(self) -> None:
     self.files = {"/hello.py": b"value = 42\n"}
+    self.read_errors: set[str] = set()
     self.calls: list[tuple[str, str]] = []
 
   async def stat(self, path: str) -> VfsMetadata:
@@ -26,6 +29,8 @@ class MemoryVfs:
 
   async def read(self, path: str) -> bytes:
     self.calls.append(("read", path))
+    if path in self.read_errors:
+      raise FileNotFoundError(path)
     try:
       return self.files[path]
     except KeyError:
@@ -77,6 +82,95 @@ class DirectoryVfs:
 
 
 class VfsTests(unittest.IsolatedAsyncioTestCase):
+  async def test_overload_error_is_not_cached(self) -> None:
+    vfs = MemoryVfs()
+    runtime = PythonRuntime(
+      vfs=vfs,
+      cache_vfs=True,
+      host_dispatch_concurrency=1,
+      host_dispatch_queue_capacity=1,
+    )
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+    first: asyncio.Task[RuntimeResult] | None = None
+    second: asyncio.Task[RuntimeResult] | None = None
+
+    @runtime.rpc.expose
+    async def held(name: str) -> str:
+      if name == "first":
+        first_started.set()
+        await release.wait()
+      return name
+
+    try:
+      first = asyncio.create_task(runtime.execute("await held('first')"))
+      await asyncio.wait_for(first_started.wait(), timeout=5)
+      second = asyncio.create_task(runtime.execute("await held('second')"))
+      await asyncio.sleep(0.05)
+
+      overloaded = await asyncio.wait_for(
+        runtime.execute("import hello"),
+        timeout=2,
+      )
+      self.assertIn("OSError", overloaded.error or "")
+
+      release.set()
+      await asyncio.gather(first, second)
+      recovered = await runtime.execute(
+        "import hello\nprint(hello.value, flush=True)",
+      )
+      self.assertIsNone(recovered.error)
+      self.assertEqual(recovered.stdout, b"42\n")
+    finally:
+      release.set()
+      pending = [task for task in (first, second) if task is not None]
+      if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+      await runtime.close()
+
+  async def test_negative_cache_policy(self) -> None:
+    vfs = MemoryVfs()
+    vfs.files["/late.py"] = b"value = 7\n"
+    vfs.read_errors.add("/late.py")
+    runtime = PythonRuntime(vfs=vfs, cache_vfs=True)
+    try:
+      missing = await runtime.execute("import late")
+      self.assertIsNotNone(missing.error)
+
+      vfs.read_errors.remove("/late.py")
+      available = await runtime.execute(
+        "import late\nprint(late.value, flush=True)",
+      )
+      self.assertIsNone(available.error)
+      self.assertEqual(available.stdout, b"7\n")
+    finally:
+      await runtime.close()
+
+    cached_vfs = MemoryVfs()
+    cached_vfs.files["/late.py"] = b"value = 8\n"
+    cached_vfs.read_errors.add("/late.py")
+    cached_runtime = PythonRuntime(
+      vfs=cached_vfs,
+      cache_vfs=True,
+      cache_vfs_negative=True,
+    )
+    try:
+      missing = await cached_runtime.execute("import late")
+      self.assertIsNotNone(missing.error)
+
+      cached_vfs.read_errors.remove("/late.py")
+      still_missing = await cached_runtime.execute("import late")
+      self.assertIsNotNone(still_missing.error)
+
+      await cached_runtime.invalidate_vfs("/late.py")
+      available = await cached_runtime.execute(
+        "import late\nprint(late.value, flush=True)",
+      )
+      self.assertIsNone(available.error)
+      self.assertEqual(available.stdout, b"8\n")
+    finally:
+      await cached_runtime.close()
+
   async def test_import_cache_and_invalidation(self) -> None:
     vfs = MemoryVfs()
     runtime = PythonRuntime(vfs=vfs, cache_vfs=True)

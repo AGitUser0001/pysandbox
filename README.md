@@ -144,7 +144,9 @@ runtime = PythonRuntime(vfs=Vfs(), cache_vfs=True)
 Handlers may be synchronous or asynchronous. With caching enabled, results
 are shared across workers until the host calls
 `await runtime.invalidate_vfs(path)`. Passing no path clears the whole cache.
-The guest cannot write to the VFS.
+Successful responses are cached by default. Set `cache_vfs_negative=True` to
+also cache non-I/O errors such as missing paths; overload, transport, and
+malformed-response errors are never cached. The guest cannot write to the VFS.
 
 `worker_queue_capacity` bounds pending executions and user-level calls for
 each worker. When either queue is full, new work fails immediately without
