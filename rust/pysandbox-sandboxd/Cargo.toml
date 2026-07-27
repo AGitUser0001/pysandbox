@@ -1,0 +1,22 @@
+[package]
+name = "pysandbox-sandboxd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+bytes.workspace = true
+eryx-vfs = { path = "../../vendor/eryx-vfs" }
+futures-util.workspace = true
+interprocess.workspace = true
+pysandbox-protocol = { path = "../pysandbox-protocol" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true

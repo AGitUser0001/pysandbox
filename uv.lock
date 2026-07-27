@@ -43,35 +43,33 @@ wheels = [
 ]
 
 [[package]]
-name = "pysandbox"
-version = "0.4.7.2"
-source = { editable = "." }
-dependencies = [
-    { name = "cbor2" },
-    { name = "wasmtime" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cbor2", specifier = ">=6" },
-    { name = "wasmtime", specifier = ">=47.0.1" },
+name = "componentize-py"
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/e9/e6d79c0e41c95b512bd6bceaadd9b116a2f7a8f1061dc7c5f4d8fd61ec79/componentize_py-0.25.0.tar.gz", hash = "sha256:c3efc804e16ee28aa16be75fb7da8c39729806e736ad626ea7f8db46619dab53", size = 191867, upload-time = "2026-07-07T22:14:47.804Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/2a/d1b06f3411e59b38441b70826546d4efd6185f7132e6c3cfad2b7309e6fe/componentize_py-0.25.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:9940df0d2408ec7e9c1a7d3645fd7c25926759867b28709b89fca007fc879d0e", size = 16570205, upload-time = "2026-07-07T22:14:15.909Z" },
+    { url = "https://files.pythonhosted.org/packages/34/73/e6452722dc1eaca59437ef6f40c0bdeb99a2917d14f98c346062811ceb2d/componentize_py-0.25.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:cc085b1b92213aa2f0747e80c144a7e80922430c0d4caa787045bf6ae58935d1", size = 15784291, upload-time = "2026-07-07T22:14:23.445Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/f6/c8b89a74bc90869fb0ef62e50d140dc372353f2f0071f9815c6cf18aab65/componentize_py-0.25.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:7a3c378af2fe9026c07899e9b92a94725346355185c247d28570a359f05373cb", size = 16854418, upload-time = "2026-07-07T22:14:30.96Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/e8/9d123bb8e156edb600c8aba3bdca91a44be510857ee5f1b66bc9f476967c/componentize_py-0.25.0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:d40832bc690ef244f219ae7e2d428c7b8754d23e011db99892205642a243ecda", size = 17340906, upload-time = "2026-07-07T22:14:38.827Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/d6/cb05fe58ee38343836e61e8d323a135a03e6f9e9729aa941f836396cdd45/componentize_py-0.25.0-cp39-abi3-win_amd64.whl", hash = "sha256:a5f0c0ec5c451d3d9f238aa41b00ab91af1f340054b7f5e3e8b0c04d5c77e10c", size = 15269374, upload-time = "2026-07-07T22:14:45.99Z" },
 ]
 
 [[package]]
-name = "wasmtime"
-version = "47.0.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2c/94/95cab3216e1015379b4d3ad7c43ead61c3d7fbde7c5051aa46676e74a288/wasmtime-47.0.1.tar.gz", hash = "sha256:fab6ee0e87354f14ef228fa71b40841dd3c2c713f6efce636af234b4e3e6edcc", size = 129028, upload-time = "2026-07-20T18:50:19.684Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9b/97/127fac4881fe00c63b76dfdceb6f1478e94be83cbba443340f3c94463e37/wasmtime-47.0.1-py3-none-android_26_arm64_v8a.whl", hash = "sha256:844d85628e50929143f03af9a34b3cf5c9148747debced80c14776d27e18173c", size = 8872099, upload-time = "2026-07-20T18:50:00.035Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/d4/9bd5b086f260c6868fe63947d944eed310f8b508768e932d3f1b120bf773/wasmtime-47.0.1-py3-none-android_26_x86_64.whl", hash = "sha256:749c5c1271ca208f1026001ddc65984fa98113e583521d47ae7e11bc96bf337d", size = 9886842, upload-time = "2026-07-20T18:50:02.202Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/c2/470db1a8a4fd3080ec91700613526ec5c8f3699bf07cf1aa7c09812063c8/wasmtime-47.0.1-py3-none-any.whl", hash = "sha256:5146a700c93909e797e0f6c05707c992fc75f4f5f5c5ecf826a9aff689ec6af1", size = 8069916, upload-time = "2026-07-20T18:50:03.946Z" },
-    { url = "https://files.pythonhosted.org/packages/4a/07/3df9b8dba5d0abf7ea3df5d12048cb2fe4d026f3df14ad9693f81ae71654/wasmtime-47.0.1-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:8b4ec103273ec3dce86efe6793d41f83df713983d9cbc5c9662adbb56cf00ffe", size = 9646308, upload-time = "2026-07-20T18:50:05.504Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/b2/fc660c451b7969a9eef8d35f505837ffc8e8a21064f18255a8f0347c1318/wasmtime-47.0.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:58da69f71750e844e32614c1805246ffca4c8b032d46a8145faa26c228c6c5ac", size = 8455235, upload-time = "2026-07-20T18:50:07.246Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/ba/f321faaad1d616b94fe70a62ebb7e4054cfe41a6a46aa796ad2bb07fa08c/wasmtime-47.0.1-py3-none-manylinux1_x86_64.whl", hash = "sha256:9724600b036c6e95c4fe952e29fad83b4f02bdc11d23f25c4ee3ffff2c1d7257", size = 9963365, upload-time = "2026-07-20T18:50:08.973Z" },
-    { url = "https://files.pythonhosted.org/packages/d7/93/f12469c859fed8332961c4efa68c1f1981542b9ce95248b617255938a55d/wasmtime-47.0.1-py3-none-manylinux2014_aarch64.whl", hash = "sha256:4f72162ceed1d50de8226fac6b12e1ecce54883a0c3f7355bb141eae40df488a", size = 8822179, upload-time = "2026-07-20T18:50:11.056Z" },
-    { url = "https://files.pythonhosted.org/packages/ab/24/545c7a118750f997986127e826ae900070c515081b48dba8c7ac175a7956/wasmtime-47.0.1-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:0aeb53d4c8e682cccebbaac48882939b34e71a1243b622129de3e6834728044d", size = 8857887, upload-time = "2026-07-20T18:50:13.39Z" },
-    { url = "https://files.pythonhosted.org/packages/ab/a1/1640bf06ee0515a3eac1a84ae1805cab5407af6226ad52a9e6034d43974f/wasmtime-47.0.1-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:f900fa571a9a5668b6210de9ecca1c5b66db14d85b7c36514c3d307d4f4cdc90", size = 10013249, upload-time = "2026-07-20T18:50:15.031Z" },
-    { url = "https://files.pythonhosted.org/packages/90/e4/8603bd4a360edbe5178efe4e7b48f1677749a96a3caa3fc68ab23b0de62c/wasmtime-47.0.1-py3-none-win_amd64.whl", hash = "sha256:4e46a4a29092a2ac1001159d5673e2a23996f4474261c791401867b1630429f4", size = 8069924, upload-time = "2026-07-20T18:50:16.902Z" },
-    { url = "https://files.pythonhosted.org/packages/e3/c6/183b9cff18b77d7f87ade1ae48ae971b25de3b367bf3c8e65ab253751444/wasmtime-47.0.1-py3-none-win_arm64.whl", hash = "sha256:812058e7b40b73defa1d5118c25faa674920b7833c0a22cf79f0ff4eadee0c32", size = 6962708, upload-time = "2026-07-20T18:50:18.404Z" },
+name = "pysandbox"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cbor2" },
 ]
+
+[package.dev-dependencies]
+dev = [
+    { name = "componentize-py" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "cbor2", specifier = ">=6" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "componentize-py" }]
