@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 
 from pysandbox import (
   PythonRuntime,
+  RpcContext,
   RuntimeResult,
   VfsDirectoryEntry,
   VfsMetadata,
@@ -95,7 +96,7 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     second: asyncio.Task[RuntimeResult] | None = None
 
     @runtime.rpc.expose
-    async def held(name: str) -> str:
+    async def held(context: RpcContext, /, name: str) -> str:
       if name == "first":
         first_started.set()
         await release.wait()

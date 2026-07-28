@@ -534,6 +534,7 @@ struct ComponentState {
     worker_call_queue: Arc<AsyncMutex<mpsc::Receiver<WorkerCallMessage>>>,
     execution_control: Arc<ExecutionControlState>,
     rpc: RpcBridge,
+    rpc_methods: HashSet<String>,
     max_guest_rpc_bytes: usize,
 }
 
@@ -718,6 +719,9 @@ impl pysandbox::python::host::HostWithStore<ComponentState> for HasSelf<Componen
                     "guest RPC payload exceeded {} bytes",
                     state.max_guest_rpc_bytes
                 ));
+            }
+            if !state.rpc_methods.contains(&method) {
+                return Err(format!("RPC method is not available: {method}"));
             }
             Ok(state.rpc.clone())
         })?;
@@ -935,6 +939,7 @@ impl ComponentWorker {
                 worker_call_queue: Arc::new(AsyncMutex::new(worker_call_receiver)),
                 execution_control: control.state.clone(),
                 rpc,
+                rpc_methods: HashSet::new(),
                 max_guest_rpc_bytes: 10 * 1024 * 1024,
             },
         );
@@ -993,10 +998,12 @@ impl ComponentWorker {
         execution_id: u64,
         program: String,
         limits: ExecutionLimits,
+        rpc_methods: Vec<String>,
         output_sender: mpsc::UnboundedSender<OutputEvent>,
     ) -> Result<std::result::Result<(), String>> {
         self.control.begin(execution_id, limits.timeout);
         self.store.data_mut().program = program;
+        self.store.data_mut().rpc_methods = rpc_methods.into_iter().collect();
         if let Err(error) = self.apply_limits(&limits, output_sender) {
             self.output.finish();
             self.control.finish(execution_id);
@@ -1092,6 +1099,7 @@ async fn run_build_program(
                 fuel: u64::MAX,
                 timeout: Some(Duration::from_secs(120)),
             },
+            Vec::new(),
             output_sender,
         )
         .await?;

@@ -6,12 +6,13 @@ import unittest
 from pathlib import Path
 
 from pysandbox import _core
+from pysandbox.rpc import RpcContext
 from pysandbox.runtime import TerminationReason
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
   def test_protocol_version(self) -> None:
-    self.assertEqual(_core.protocol_version(), 1)
+    self.assertEqual(_core.protocol_version(), 2)
 
   async def test_tokio_awaitable(self) -> None:
     self.assertIsNone(await _core.sleep(0))
@@ -37,16 +38,16 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
       with self.assertRaisesRegex(ValueError, "timeout must be"):
         sandbox.run("pass", timeout=0)
 
-      def add(a: int, b: int) -> int:
+      def add(context: RpcContext, /, a: int, b: int) -> int:
         return a + b
 
-      async def multiply(a: int, b: int) -> int:
+      async def multiply(context: RpcContext, /, a: int, b: int) -> int:
         await asyncio.sleep(0)
         return a * b
 
       queue_gate = asyncio.Event()
 
-      async def wait_for_queue_gate() -> None:
+      async def wait_for_queue_gate(context: RpcContext, /) -> None:
         await queue_gate.wait()
 
       sandbox.expose("add", add)
@@ -54,13 +55,15 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
       sandbox.expose("wait_for_queue_gate", wait_for_queue_gate)
       rpc_result = await sandbox.execute(
         'print(await call("add", 2, b=5), flush=True)\n'
-        'print(await call("multiply", 3, 4), flush=True)'
+        'print(await call("multiply", 3, 4), flush=True)',
+        rpc_methods=["add", "multiply"],
       )
       self.assertIsNone(rpc_result.error)
       self.assertEqual(rpc_result.stdout, b"7\n12\n")
 
       limited_rpc = await sandbox.execute(
         'await call("add", 2, 5)',
+        rpc_methods=["add"],
         max_guest_rpc_bytes=1,
       )
       self.assertIsNotNone(limited_rpc.error)
@@ -105,6 +108,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         'print("spin-ready", flush=True)\n'
         "await spin(concurrent=True)",
         worker_id=0,
+        rpc_methods=["multiply"],
       )
       for _ in range(1_000):
         if b"".join(event.data for event in execution.output) == b"spin-ready\n":
@@ -149,6 +153,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
       busy = sandbox.run(
         'print("queue-ready", flush=True)\nawait call("wait_for_queue_gate")',
         worker_id=3,
+        rpc_methods=["wait_for_queue_gate"],
       )
       for _ in range(1_000):
         if b"".join(event.data for event in busy.output) == b"queue-ready\n":

@@ -1,8 +1,11 @@
 from collections.abc import Callable
 from typing import overload
 
-__all__ = ["RpcHandler", "RpcHost"]
+from . import _core
 
+__all__ = ["RpcContext", "RpcHandler", "RpcHost"]
+
+RpcContext = _core.RpcContext
 type RpcHandler = Callable[..., object]
 type RpcHandlerDecorator = Callable[[RpcHandler], RpcHandler]
 

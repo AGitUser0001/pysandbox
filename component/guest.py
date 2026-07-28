@@ -1,3 +1,4 @@
+# type: ignore
 import ast
 import asyncio
 import inspect

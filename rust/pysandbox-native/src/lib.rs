@@ -28,6 +28,12 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 pyo3::create_exception!(_core, WorkerStoppedError, PyRuntimeError);
 
+#[pyclass(frozen, get_all)]
+struct RpcContext {
+    worker_id: u64,
+    request_id: u64,
+}
+
 #[pyfunction]
 fn protocol_version() -> u16 {
     pysandbox_protocol::PROTOCOL_VERSION
@@ -173,6 +179,7 @@ impl SandboxProcess {
         program,
         *,
         worker_id = 0,
+        rpc_methods = Vec::new(),
         max_memory_bytes = 128 * 1024 * 1024,
         max_output_bytes = 256 * 1024,
         max_guest_rpc_bytes = 10 * 1024 * 1024,
@@ -185,6 +192,7 @@ impl SandboxProcess {
         py: Python<'_>,
         program: String,
         worker_id: u64,
+        rpc_methods: Vec<String>,
         max_memory_bytes: u64,
         max_output_bytes: u64,
         max_guest_rpc_bytes: u64,
@@ -201,6 +209,7 @@ impl SandboxProcess {
         let timeout_ms = timeout_milliseconds(timeout)?;
         let payload = encode_payload(&ExecuteRequest {
             program,
+            rpc_methods,
             limits: ExecutionLimits {
                 max_memory_bytes,
                 max_output_bytes,
@@ -236,6 +245,7 @@ impl SandboxProcess {
         program,
         *,
         worker_id = 0,
+        rpc_methods = Vec::new(),
         max_memory_bytes = 128 * 1024 * 1024,
         max_output_bytes = 256 * 1024,
         max_guest_rpc_bytes = 10 * 1024 * 1024,
@@ -248,6 +258,7 @@ impl SandboxProcess {
         py: Python<'py>,
         program: String,
         worker_id: u64,
+        rpc_methods: Vec<String>,
         max_memory_bytes: u64,
         max_output_bytes: u64,
         max_guest_rpc_bytes: u64,
@@ -266,6 +277,7 @@ impl SandboxProcess {
 
             let payload = encode_payload(&ExecuteRequest {
                 program,
+                rpc_methods,
                 limits: ExecutionLimits {
                     max_memory_bytes,
                     max_output_bytes,
@@ -742,7 +754,7 @@ async fn dispatch_guest_call(
     handlers: &RpcHandlers,
 ) {
     let result = match decode_payload::<RpcCall>(&frame.payload) {
-        Ok(call) => invoke_rpc_handler(handlers, call).await,
+        Ok(call) => invoke_rpc_handler(handlers, frame.worker_id, frame.request_id, call).await,
         Err(error) => Err(error.to_string()),
     };
     let response = match result {
@@ -934,7 +946,12 @@ fn vfs_python_error(error: PyErr) -> VfsError {
     })
 }
 
-async fn invoke_rpc_handler(handlers: &RpcHandlers, call: RpcCall) -> Result<Vec<u8>, String> {
+async fn invoke_rpc_handler(
+    handlers: &RpcHandlers,
+    worker_id: u64,
+    request_id: u64,
+    call: RpcCall,
+) -> Result<Vec<u8>, String> {
     let (handler, locals) = Python::attach(|py| {
         let handlers = handlers.lock().expect("RPC handler lock poisoned");
         let handler = handlers
@@ -949,9 +966,21 @@ async fn invoke_rpc_handler(handlers: &RpcHandlers, call: RpcCall) -> Result<Vec
         let args = decoded.get_item(0)?;
         let kwargs = decoded.get_item(1)?;
         let args = py.get_type::<PyTuple>().call1((args,))?;
+        let context = Py::new(
+            py,
+            RpcContext {
+                worker_id,
+                request_id,
+            },
+        )?;
+        let guest_args = args.cast::<PyTuple>()?;
+        let mut positional = Vec::with_capacity(guest_args.len() + 1);
+        positional.push(context.into_bound(py).into_any());
+        positional.extend(guest_args.iter());
+        let args = PyTuple::new(py, positional)?;
         let result = handler
             .bind(py)
-            .call(args.cast::<PyTuple>()?, Some(kwargs.cast::<PyDict>()?))?;
+            .call(&args, Some(kwargs.cast::<PyDict>()?))?;
         let is_awaitable = py
             .import("inspect")?
             .call_method1("isawaitable", (&result,))?
@@ -1456,6 +1485,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeExecution>()?;
     module.add_class::<NativeExecutionResult>()?;
     module.add_class::<NativeOutputEvent>()?;
+    module.add_class::<RpcContext>()?;
     module.add_class::<SandboxProcess>()?;
     module.add_function(wrap_pyfunction!(protocol_version, module)?)?;
     module.add_function(wrap_pyfunction!(run_sandboxd, module)?)?;

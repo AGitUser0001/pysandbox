@@ -417,7 +417,13 @@ async fn execute(
     });
 
     let result = worker
-        .run(request_id, request.program, limits, output_sender)
+        .run(
+            request_id,
+            request.program,
+            limits,
+            request.rpc_methods,
+            output_sender,
+        )
         .await;
     let (error, reason) = match result {
         Ok(Ok(())) => (None, TerminationReason::Completed),

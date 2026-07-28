@@ -3,6 +3,12 @@ from os import PathLike
 
 class WorkerStoppedError(RuntimeError): ...
 
+class RpcContext:
+  @property
+  def worker_id(self) -> int: ...
+  @property
+  def request_id(self) -> int: ...
+
 def protocol_version() -> int: ...
 def sleep(milliseconds: int) -> Awaitable[None]: ...
 def run_sandboxd(
@@ -27,6 +33,7 @@ class SandboxProcess:
     program: str,
     *,
     worker_id: int = 0,
+    rpc_methods: list[str] = [],
     max_memory_bytes: int = 128 * 1024 * 1024,
     max_output_bytes: int = 256 * 1024,
     max_guest_rpc_bytes: int = 10 * 1024 * 1024,
@@ -38,6 +45,7 @@ class SandboxProcess:
     program: str,
     *,
     worker_id: int = 0,
+    rpc_methods: list[str] = [],
     max_memory_bytes: int = 128 * 1024 * 1024,
     max_output_bytes: int = 256 * 1024,
     max_guest_rpc_bytes: int = 10 * 1024 * 1024,

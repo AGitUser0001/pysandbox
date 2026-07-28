@@ -4,6 +4,7 @@ import keyword
 import sys
 import tempfile
 from collections import UserList
+from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -211,12 +212,14 @@ class PythonRuntime:
     program: str,
     *,
     limits: RuntimeLimits | None = None,
+    rpc_methods: Collection[str] | None = None,
     spin: bool = False,
     spin_concurrent: bool = True,
   ) -> RuntimeResult:
     worker = self._run(
       program,
       limits=limits,
+      rpc_methods=rpc_methods,
       spin=spin,
       spin_concurrent=spin_concurrent,
     )
@@ -227,12 +230,14 @@ class PythonRuntime:
     program: str,
     *,
     limits: RuntimeLimits | None = None,
+    rpc_methods: Collection[str] | None = None,
     spin: bool = True,
     spin_concurrent: bool = True,
   ) -> "Worker":
     return self._run(
       program,
       limits=limits,
+      rpc_methods=rpc_methods,
       spin=spin,
       spin_concurrent=spin_concurrent,
     )
@@ -271,19 +276,23 @@ class PythonRuntime:
     program: str,
     *,
     limits: RuntimeLimits | None,
+    rpc_methods: Collection[str] | None,
     spin: bool,
     spin_concurrent: bool,
   ) -> "Worker":
     asyncio.get_running_loop()
+    selected_rpc_methods = self._select_rpc_methods(rpc_methods)
     return Worker(
       runtime=self,
       worker_id=next(self._worker_ids),
       program=self._prepare_program(
         program,
+        rpc_methods=selected_rpc_methods,
         spin=spin,
         spin_concurrent=spin_concurrent,
       ),
       limits=limits or RuntimeLimits(),
+      rpc_methods=selected_rpc_methods,
     )
 
   async def _get_sandbox(self) -> _core.SandboxProcess:
@@ -344,6 +353,7 @@ class PythonRuntime:
     self,
     program: str,
     *,
+    rpc_methods: tuple[str, ...],
     spin: bool,
     spin_concurrent: bool,
   ) -> str:
@@ -352,13 +362,27 @@ class PythonRuntime:
         f"async def {method}(*args, **kwargs):\n"
         f"  return await call({method!r}, *args, **kwargs)\n"
       )
-      for method in self.rpc.methods
+      for method in rpc_methods
       if method.isidentifier() and not keyword.iskeyword(method)
     ]
     source = "".join(proxies) + program
     if spin:
       source += f"\nawait spin(concurrent={spin_concurrent!r})\n"
     return source
+
+  def _select_rpc_methods(
+    self,
+    rpc_methods: Collection[str] | None,
+  ) -> tuple[str, ...]:
+    available = self.rpc.methods
+    if rpc_methods is None:
+      return available
+    selected = tuple(dict.fromkeys(rpc_methods))
+    unknown = set(selected).difference(available)
+    if unknown:
+      names = ", ".join(sorted(unknown))
+      raise ValueError(f"unknown RPC methods: {names}")
+    return selected
 
 
 class Worker:
@@ -369,12 +393,14 @@ class Worker:
     worker_id: int,
     program: str,
     limits: RuntimeLimits,
+    rpc_methods: tuple[str, ...],
   ) -> None:
     self.runtime = runtime
     self.worker_id = worker_id
     self.result = RuntimeResult()
     self._program = program
     self._limits = limits
+    self._rpc_methods = rpc_methods
     self._execution: asyncio.Future[_core.Execution] = (
       asyncio.get_running_loop().create_future()
     )
@@ -454,6 +480,7 @@ class Worker:
       execution = sandbox.run(
         self._program,
         worker_id=self.worker_id,
+        rpc_methods=list(self._rpc_methods),
         max_memory_bytes=self._limits.max_memory_bytes,
         max_output_bytes=self._limits.max_output_bytes,
         max_guest_rpc_bytes=self._limits.max_guest_rpc_bytes,

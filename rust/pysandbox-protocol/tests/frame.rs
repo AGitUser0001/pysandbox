@@ -43,6 +43,7 @@ fn typed_payloads_round_trip_separately_from_the_frame() {
     let request = ExecuteRequest {
         program: "print('hello')".into(),
         limits: ExecutionLimits::default(),
+        rpc_methods: vec!["read".into()],
     };
 
     assert_eq!(

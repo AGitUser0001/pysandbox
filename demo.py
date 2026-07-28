@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, Protocol, Self
 
-from pysandbox import PythonRuntime, RuntimeLimits
+from pysandbox import PythonRuntime, RpcContext, RuntimeLimits
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -128,11 +128,11 @@ def create_runtime() -> PythonRuntime:
   runtime = PythonRuntime()
 
   @runtime.rpc.expose
-  def add(a: int, b: int) -> int:
+  def add(context: RpcContext, /, a: int, b: int) -> int:
     return int(a) + int(b)
 
   @runtime.rpc.expose("host_upper")
-  def uppercase(text: str) -> str:
+  def uppercase(context: RpcContext, /, text: str) -> str:
     return text.upper()
 
   return runtime
@@ -141,16 +141,16 @@ def create_runtime() -> PythonRuntime:
 def host_setup_example() -> str:
   return textwrap.dedent(
     """
-        from pysandbox import PythonRuntime, RuntimeLimits
+        from pysandbox import PythonRuntime, RpcContext, RuntimeLimits
 
         runtime = PythonRuntime()
 
         @runtime.rpc.expose
-        def add(a: int, b: int) -> int:
+        def add(context: RpcContext, /, a: int, b: int) -> int:
             return int(a) + int(b)
 
         @runtime.rpc.expose("host_upper")
-        def uppercase(text: str) -> str:
+        def uppercase(context: RpcContext, /, text: str) -> str:
             return text.upper()
         """
   ).strip()
@@ -343,7 +343,7 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
     textwrap.dedent(
       """
             @runtime.rpc.expose
-            def add(a: int, b: int) -> int:
+            def add(context: RpcContext, /, a: int, b: int) -> int:
                 return a + b
             """
     ).strip(),

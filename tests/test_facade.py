@@ -5,6 +5,7 @@ from pysandbox import (
   AddFuel,
   Output,
   PythonRuntime,
+  RpcContext,
   RuntimeLimits,
   RuntimeResult,
   TerminationReason,
@@ -26,16 +27,16 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     runtime = PythonRuntime()
 
     @runtime.rpc.expose
-    def add(a: int, b: int) -> int:
+    def add(context: RpcContext, /, a: int, b: int) -> int:
       return a + b
 
     @runtime.rpc.expose("host_upper")
-    async def upper(value: str) -> str:
+    async def upper(context: RpcContext, /, value: str) -> str:
       await asyncio.sleep(0)
       return value.upper()
 
     @runtime.rpc.expose
-    async def host_wait(delay: float) -> str:
+    async def host_wait(context: RpcContext, /, delay: float) -> str:
       await asyncio.sleep(delay)
       return "finished"
 
@@ -106,9 +107,19 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
 
   async def test_crossed_worker_rpc(self) -> None:
     runtime = PythonRuntime()
+    expected_worker_ids: dict[str, int] = {}
+    request_ids: set[int] = set()
 
     @runtime.rpc.expose
-    async def host_echo(worker: str, value: int) -> tuple[str, int]:
+    async def host_echo(
+      context: RpcContext,
+      /,
+      worker: str,
+      value: int,
+    ) -> tuple[str, int]:
+      self.assertEqual(context.worker_id, expected_worker_ids[worker])
+      self.assertNotIn(context.request_id, request_ids)
+      request_ids.add(context.request_id)
       await asyncio.sleep(0)
       return worker, value
 
@@ -118,6 +129,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     second = runtime.run(
       "async def relay(value):\n  return await host_echo('second', value)\n",
     )
+    expected_worker_ids.update(first=first.worker_id, second=second.worker_id)
     try:
       calls = [
         worker.call(("relay",), None, value)
@@ -129,6 +141,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         results,
         [[name, value] for value in range(32) for name in ("first", "second")],
       )
+      self.assertEqual(len(request_ids), 64)
     finally:
       await asyncio.gather(first.close(), second.close())
       await runtime.close()
@@ -204,7 +217,11 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     runtime = PythonRuntime()
 
     @runtime.rpc.expose
-    def preserve_sharing(value: list[list[object]]) -> list[list[object]]:
+    def preserve_sharing(
+      context: RpcContext,
+      /,
+      value: list[list[object]],
+    ) -> list[list[object]]:
       self.assertIs(value[0], value[1])
       shared: list[object] = []
       return [shared, shared]
@@ -234,6 +251,58 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       self.assertIs(result[0], result[1])
     finally:
       await worker.close()
+      await runtime.close()
+
+  async def test_rpc_context_and_per_execution_methods(self) -> None:
+    runtime = PythonRuntime()
+    contexts: list[RpcContext] = []
+    denied_called = False
+
+    @runtime.rpc.expose
+    def allowed(context: RpcContext, /) -> tuple[int, int]:
+      contexts.append(context)
+      return context.worker_id, context.request_id
+
+    @runtime.rpc.expose
+    def denied(context: RpcContext, /) -> None:
+      nonlocal denied_called
+      denied_called = True
+
+    @runtime.rpc.expose("method/name")
+    def non_identifier(context: RpcContext, /) -> str:
+      return "explicit"
+
+    try:
+      selected = await runtime.execute(
+        "assert 'allowed' in globals()\n"
+        "assert 'denied' not in globals()\n"
+        "worker_id, request_id = await allowed()\n"
+        "assert worker_id > 0 and request_id > 0\n",
+        rpc_methods={"allowed"},
+      )
+      self.assertEqual(selected.reason, TerminationReason.COMPLETED)
+      self.assertEqual(len(contexts), 1)
+      self.assertEqual(contexts[0].worker_id, 1)
+      self.assertGreater(contexts[0].request_id, 0)
+
+      bypass = await runtime.execute(
+        "await call('denied')",
+        rpc_methods={"allowed"},
+      )
+      self.assertEqual(bypass.reason, TerminationReason.GUEST_ERROR)
+      self.assertIn("RPC method is not available: denied", bypass.error or "")
+      self.assertFalse(denied_called)
+
+      explicit = await runtime.execute(
+        "assert 'method/name' not in globals()\n"
+        "assert await call('method/name') == 'explicit'\n",
+        rpc_methods={"method/name"},
+      )
+      self.assertEqual(explicit.reason, TerminationReason.COMPLETED)
+
+      with self.assertRaisesRegex(ValueError, "unknown RPC methods: missing"):
+        await runtime.execute("pass", rpc_methods={"missing"})
+    finally:
       await runtime.close()
 
   async def test_pending_call_fails_when_worker_stops(self) -> None:
@@ -273,7 +342,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     release = asyncio.Event()
 
     @runtime.rpc.expose
-    async def held_call() -> None:
+    async def held_call(context: RpcContext, /) -> None:
       nonlocal active, maximum_active
       active += 1
       maximum_active = max(maximum_active, active)
@@ -313,7 +382,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     second: asyncio.Task[RuntimeResult] | None = None
 
     @runtime.rpc.expose
-    async def saturated_call(name: str) -> str:
+    async def saturated_call(context: RpcContext, /, name: str) -> str:
       if name == "first":
         first_started.set()
         await make_worker_call.wait()
@@ -355,7 +424,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     release = asyncio.Event()
 
     @runtime.rpc.expose
-    async def wait_on_host() -> None:
+    async def wait_on_host(context: RpcContext, /) -> None:
       host_call_started.set()
       await release.wait()
 
@@ -382,7 +451,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     runtime = PythonRuntime()
 
     @runtime.rpc.expose
-    async def wait_forever() -> None:
+    async def wait_forever(context: RpcContext, /) -> None:
       await asyncio.Event().wait()
 
     worker = runtime.run("await wait_forever()")

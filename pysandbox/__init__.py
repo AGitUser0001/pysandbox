@@ -1,4 +1,4 @@
-from .rpc import RpcHandler, RpcHost
+from .rpc import RpcContext, RpcHandler, RpcHost
 from .runtime import (
   AddFuel,
   Output,
@@ -20,6 +20,7 @@ __all__ = [
   "Output",
   "OutputEvent",
   "PythonRuntime",
+  "RpcContext",
   "RpcHandler",
   "RpcHost",
   "RuntimeLimits",

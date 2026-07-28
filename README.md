@@ -13,14 +13,14 @@ uv run demo.py
 ```python
 import asyncio
 
-from pysandbox import PythonRuntime, RuntimeLimits
+from pysandbox import PythonRuntime, RpcContext, RuntimeLimits
 
 
 async def main() -> None:
   runtime = PythonRuntime()
 
   @runtime.rpc.expose
-  def add(a: int, b: int) -> int:
+  def add(context: RpcContext, /, a: int, b: int) -> int:
     return a + b
 
   try:
@@ -37,7 +37,13 @@ asyncio.run(main())
 ```
 
 Exposed host handlers may be synchronous or asynchronous. Guest proxies are
-asynchronous, so guest code calls them with `await`.
+asynchronous, so guest code calls them with `await`. Each handler receives an
+`RpcContext` containing the worker and request IDs as its positional-only first
+argument. Pass `rpc_methods={"method"}` to `execute()` or `run()` to restrict
+which exposed methods that guest may call. Methods that are valid Python
+identifiers receive convenience proxy functions in the guest namespace.
+Non-identifier names are deliberately hidden from that namespace and must be
+invoked explicitly with `await call("method/name", ...)`.
 
 ## Persistent Workers
 
