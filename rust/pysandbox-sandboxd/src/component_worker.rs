@@ -15,8 +15,8 @@ use tokio::io::AsyncWrite;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{
-    AsContextMut, Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder,
-    UpdateDeadline,
+    AsContextMut, Config, Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits,
+    StoreLimitsBuilder, UpdateDeadline,
 };
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
@@ -61,6 +61,7 @@ struct OutputState {
     events: Vec<OutputEvent>,
     max_bytes: usize,
     size: usize,
+    limit_exceeded: bool,
     sender: Option<mpsc::UnboundedSender<OutputEvent>>,
 }
 
@@ -71,6 +72,7 @@ impl Default for Output {
                 events: Vec::new(),
                 max_bytes: usize::MAX,
                 size: 0,
+                limit_exceeded: false,
                 sender: None,
             })),
         }
@@ -91,6 +93,7 @@ impl Output {
         state.events.clear();
         state.max_bytes = max_bytes;
         state.size = 0;
+        state.limit_exceeded = false;
         state.sender = Some(sender);
     }
 
@@ -111,9 +114,10 @@ impl Output {
     }
 
     fn writable_bytes(&self) -> Result<usize> {
-        let state = self.state.lock().expect("output lock poisoned");
+        let mut state = self.state.lock().expect("output lock poisoned");
         let remaining = state.max_bytes.saturating_sub(state.size);
         if remaining == 0 {
+            state.limit_exceeded = true;
             bail!("guest output exceeded {} bytes", state.max_bytes);
         }
         Ok(remaining)
@@ -123,6 +127,7 @@ impl Output {
         let mut state = self.state.lock().expect("output lock poisoned");
         let remaining = state.max_bytes.saturating_sub(state.size);
         if data.len() > remaining {
+            state.limit_exceeded = true;
             bail!("guest output exceeded {} bytes", state.max_bytes);
         }
 
@@ -138,6 +143,13 @@ impl Output {
             }
         }
         Ok(())
+    }
+
+    pub fn limit_error(&self) -> Option<String> {
+        let state = self.state.lock().expect("output lock poisoned");
+        state
+            .limit_exceeded
+            .then(|| format!("guest output exceeded {} bytes", state.max_bytes))
     }
 }
 
@@ -517,12 +529,85 @@ struct ComponentState {
     table: ResourceTable,
     wasi: WasiCtx,
     vfs: HybridVfsCtx<RemoteVfs>,
-    limits: StoreLimits,
+    limits: ExecutionStoreLimits,
     control_queue: Arc<AsyncMutex<mpsc::UnboundedReceiver<ControlMessage>>>,
     worker_call_queue: Arc<AsyncMutex<mpsc::Receiver<WorkerCallMessage>>>,
     execution_control: Arc<ExecutionControlState>,
     rpc: RpcBridge,
     max_guest_rpc_bytes: usize,
+}
+
+struct ExecutionStoreLimits {
+    inner: StoreLimits,
+    max_memory_bytes: usize,
+    memory_limit_exceeded: bool,
+}
+
+impl ExecutionStoreLimits {
+    fn new(max_memory_bytes: usize) -> Self {
+        Self {
+            inner: StoreLimitsBuilder::new()
+                .memory_size(max_memory_bytes)
+                .trap_on_grow_failure(true)
+                .build(),
+            max_memory_bytes,
+            memory_limit_exceeded: false,
+        }
+    }
+
+    fn limit_error(&self) -> Option<String> {
+        self.memory_limit_exceeded
+            .then(|| format!("guest memory exceeded {} bytes", self.max_memory_bytes))
+    }
+}
+
+impl ResourceLimiter for ExecutionStoreLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> std::result::Result<bool, wasmtime::Error> {
+        if desired > self.max_memory_bytes {
+            self.memory_limit_exceeded = true;
+        }
+        self.inner.memory_growing(current, desired, maximum)
+    }
+
+    fn memory_grow_failed(
+        &mut self,
+        error: wasmtime::Error,
+    ) -> std::result::Result<(), wasmtime::Error> {
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> std::result::Result<bool, wasmtime::Error> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(
+        &mut self,
+        error: wasmtime::Error,
+    ) -> std::result::Result<(), wasmtime::Error> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
 }
 
 pub(crate) type PendingGuestCalls = Arc<
@@ -845,7 +930,7 @@ impl ComponentWorker {
                 table: ResourceTable::new(),
                 wasi,
                 vfs,
-                limits: StoreLimitsBuilder::new().build(),
+                limits: ExecutionStoreLimits::new(usize::MAX),
                 control_queue: Arc::new(AsyncMutex::new(control_receiver)),
                 worker_call_queue: Arc::new(AsyncMutex::new(worker_call_receiver)),
                 execution_control: control.state.clone(),
@@ -899,6 +984,10 @@ impl ComponentWorker {
         self.control.clone()
     }
 
+    pub fn memory_limit_error(&self) -> Option<String> {
+        self.store.data().limits.limit_error()
+    }
+
     pub async fn run(
         &mut self,
         execution_id: u64,
@@ -932,9 +1021,7 @@ impl ComponentWorker {
     ) -> Result<()> {
         self.output.begin(limits.max_output_bytes, output_sender);
         self.store.data_mut().max_guest_rpc_bytes = limits.max_guest_rpc_bytes;
-        self.store.data_mut().limits = StoreLimitsBuilder::new()
-            .memory_size(limits.max_memory_bytes)
-            .build();
+        self.store.data_mut().limits = ExecutionStoreLimits::new(limits.max_memory_bytes);
         self.store.set_fuel(limits.fuel)?;
         self.store
             .fuel_async_yield_interval(Some(DEFAULT_FUEL_YIELD_INTERVAL))?;
@@ -1078,9 +1165,7 @@ fn apply_pending_store_updates(
                 max_memory_bytes,
                 applied,
             } => {
-                store.data_mut().limits = StoreLimitsBuilder::new()
-                    .memory_size(max_memory_bytes)
-                    .build();
+                store.data_mut().limits = ExecutionStoreLimits::new(max_memory_bytes);
                 let _ = applied.send(Ok(()));
             }
             PendingStoreUpdate::SetGuestRpcLimit {
@@ -1128,5 +1213,9 @@ mod tests {
         );
         assert!(output.writable_bytes().is_err());
         assert!(output.write(OutputSource::Stderr, b"d").is_err());
+        assert_eq!(
+            output.limit_error().as_deref(),
+            Some("guest output exceeded 3 bytes")
+        );
     }
 }

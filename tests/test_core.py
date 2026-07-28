@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from pysandbox import _core
+from pysandbox.runtime import TerminationReason
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
@@ -159,7 +160,10 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         sandbox.execute("pass", worker_id=3),
         timeout=2,
       )
-      self.assertEqual(overloaded.reason, "infrastructure_error")
+      self.assertEqual(
+        overloaded.reason,
+        TerminationReason.INFRASTRUCTURE_ERROR.value,
+      )
       self.assertEqual(overloaded.error, "worker command queue is full")
 
       queue_gate.set()

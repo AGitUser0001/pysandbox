@@ -168,6 +168,7 @@ class RuntimeResult:
   ) -> str:
     return self.output.formatted_text(stdout=stdout, stderr=stderr)
 
+
 class PythonRuntime:
   def __init__(
     self,

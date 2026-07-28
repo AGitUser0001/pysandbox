@@ -190,8 +190,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
   async def test_sequential_worker_calls(self) -> None:
     runtime = PythonRuntime()
     worker = runtime.run(
-      "def echo(value):\n"
-      "  return value\n",
+      "def echo(value):\n  return value\n",
       spin_concurrent=False,
     )
     try:
@@ -370,6 +369,12 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
   async def test_structured_termination_reasons(self) -> None:
     runtime = PythonRuntime()
     try:
+      completed = await runtime.execute("pass")
+      self.assertEqual(completed.reason, TerminationReason.COMPLETED)
+
+      guest_error = await runtime.execute("raise ValueError('guest failure')")
+      self.assertEqual(guest_error.reason, TerminationReason.GUEST_ERROR)
+
       timed_out = await runtime.execute(
         "while True:\n  pass",
         limits=RuntimeLimits(timeout=0.05),
@@ -381,5 +386,35 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         limits=RuntimeLimits(fuel=1),
       )
       self.assertEqual(fuel.reason, TerminationReason.FUEL_EXHAUSTED)
+
+      output_limited = await runtime.execute(
+        "print('a' * 1025)",
+        limits=RuntimeLimits(max_output_bytes=1024),
+      )
+      self.assertEqual(output_limited.reason, TerminationReason.OUTPUT_LIMIT)
+      self.assertEqual(output_limited.error, "guest output exceeded 1024 bytes")
+      self.assertEqual(len(output_limited.stdout), 1024)
+
+      memory_limited = await runtime.execute(
+        "bytearray(256 * 1024 * 1024)",
+        limits=RuntimeLimits(max_memory_bytes=128 * 1024 * 1024),
+      )
+      self.assertEqual(memory_limited.reason, TerminationReason.MEMORY_LIMIT)
+      self.assertEqual(
+        memory_limited.error,
+        "guest memory exceeded 134217728 bytes",
+      )
+
+      runtime_error = await runtime.execute("import os\nos.abort()")
+      self.assertEqual(runtime_error.reason, TerminationReason.RUNTIME_ERROR)
+
+      cancelled_worker = runtime.run("while True:\n  pass", spin=False)
+      await asyncio.wait_for(
+        asyncio.shield(cancelled_worker._execution),
+        timeout=5,
+      )
+      await cancelled_worker.cancel()
+      cancelled = await asyncio.wait_for(cancelled_worker.task, timeout=5)
+      self.assertEqual(cancelled.reason, TerminationReason.CANCELLED)
     finally:
       await runtime.close()

@@ -13,7 +13,7 @@ strip = true
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.94"
 license = "MIT"
 
 [workspace.dependencies]

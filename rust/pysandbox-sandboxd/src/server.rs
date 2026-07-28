@@ -423,17 +423,22 @@ async fn execute(
         Ok(Ok(())) => (None, TerminationReason::Completed),
         Ok(Err(error)) => (Some(error), TerminationReason::GuestError),
         Err(error) => {
-            let message = error.to_string();
-            let reason = if worker.control().was_cancelled() {
+            let output_limit_error = worker.output().limit_error();
+            let memory_limit_error = worker.memory_limit_error();
+            let message = output_limit_error
+                .clone()
+                .or_else(|| memory_limit_error.clone())
+                .unwrap_or_else(|| error.to_string());
+            let reason = if output_limit_error.is_some() {
+                TerminationReason::OutputLimit
+            } else if memory_limit_error.is_some() {
+                TerminationReason::MemoryLimit
+            } else if worker.control().was_cancelled() {
                 TerminationReason::Cancelled
             } else if worker.control().timed_out() {
                 TerminationReason::Timeout
             } else if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 TerminationReason::FuelExhausted
-            } else if message.contains("guest output exceeded") {
-                TerminationReason::OutputLimit
-            } else if message.contains("memory") && message.contains("limit") {
-                TerminationReason::MemoryLimit
             } else {
                 TerminationReason::RuntimeError
             };
