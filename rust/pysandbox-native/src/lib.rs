@@ -971,8 +971,12 @@ async fn invoke_rpc_handler(handlers: &RpcHandlers, call: RpcCall) -> Result<Vec
     };
 
     Python::attach(|py| {
+        let options = PyDict::new(py);
+        options
+            .set_item("value_sharing", true)
+            .map_err(|error| error.to_string())?;
         py.import("cbor2")
-            .and_then(|cbor2| cbor2.call_method1("dumps", (value.bind(py),)))
+            .and_then(|cbor2| cbor2.call_method("dumps", (value.bind(py),), Some(&options)))
             .and_then(|encoded| encoded.extract::<Vec<u8>>())
             .map_err(|error| error.to_string())
     })
@@ -1162,9 +1166,11 @@ impl NativeExecution {
     ) -> PyResult<Bound<'py, PyAny>> {
         let empty_kwargs = PyDict::new(py);
         let kwargs = kwargs.unwrap_or(&empty_kwargs);
+        let cbor_options = PyDict::new(py);
+        cbor_options.set_item("value_sharing", true)?;
         let arguments = py
             .import("cbor2")?
-            .call_method1("dumps", ((args, kwargs),))?
+            .call_method("dumps", ((args, kwargs),), Some(&cbor_options))?
             .extract::<Vec<u8>>()?;
         let fuel = fuel
             .map(|(operation, value, cap)| match operation.as_str() {

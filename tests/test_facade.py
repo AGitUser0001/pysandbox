@@ -200,6 +200,42 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       await worker.close()
       await runtime.close()
 
+  async def test_rpc_preserves_shared_values_in_both_directions(self) -> None:
+    runtime = PythonRuntime()
+
+    @runtime.rpc.expose
+    def preserve_sharing(value: list[list[object]]) -> list[list[object]]:
+      self.assertIs(value[0], value[1])
+      shared: list[object] = []
+      return [shared, shared]
+
+    guest_to_host = await runtime.execute(
+      "shared = []\n"
+      "result = await preserve_sharing([shared, shared])\n"
+      "assert result[0] is result[1]\n"
+    )
+    self.assertEqual(guest_to_host.reason, TerminationReason.COMPLETED)
+
+    worker = runtime.run(
+      "def preserve_sharing(value):\n"
+      "  assert value[0] is value[1]\n"
+      "  shared = []\n"
+      "  return [shared, shared]\n"
+    )
+    try:
+      shared: list[object] = []
+      result = await worker.call(
+        ("preserve_sharing",),
+        None,
+        [shared, shared],
+      )
+      if not isinstance(result, list):
+        self.fail(f"expected list result, received {type(result).__name__}")
+      self.assertIs(result[0], result[1])
+    finally:
+      await worker.close()
+      await runtime.close()
+
   async def test_pending_call_fails_when_worker_stops(self) -> None:
     runtime = PythonRuntime()
     worker = runtime.run(

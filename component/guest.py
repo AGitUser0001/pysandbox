@@ -25,7 +25,11 @@ async def handle_worker_call(
     value = target(*args, **kwargs)
     if inspect.isawaitable(value):
       value = await value
-    await host.worker_response(request.request_id, cbor2.dumps(value), None)
+    await host.worker_response(
+      request.request_id,
+      cbor2.dumps(value, value_sharing=True),
+      None,
+    )
   except Exception:
     await host.worker_response(request.request_id, b"", traceback.format_exc())
 
@@ -51,7 +55,7 @@ async def spin(namespace: dict[str, object], concurrent: bool) -> None:
 
 
 async def call(method: str, *args: object, **kwargs: object) -> object:
-  arguments = cbor2.dumps((args, kwargs))
+  arguments = cbor2.dumps((args, kwargs), value_sharing=True)
   result = await host.call(method, arguments)
   return cbor2.loads(result)
 
