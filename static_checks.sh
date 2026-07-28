@@ -11,4 +11,5 @@ uv run python -m unittest discover -s tests -v; status4=$?
 if [ $status1 -eq 0 ] && [ $status2 -eq 0 ] && [ $status3 -eq 0 ] && [ $status4 -eq 0 ]; then
   echo 'format:'
   ruff format
+  cargo fmt --all
 fi

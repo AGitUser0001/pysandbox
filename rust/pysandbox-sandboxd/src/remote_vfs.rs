@@ -325,7 +325,10 @@ mod tests {
         let with_negative = CachePolicy::Invalidated { negative: true };
 
         assert!(response_is_cacheable(positive_only, &successes));
-        assert!(!response_is_cacheable(positive_only, &error(VfsErrorCode::NotFound)));
+        assert!(!response_is_cacheable(
+            positive_only,
+            &error(VfsErrorCode::NotFound)
+        ));
         assert!(response_is_cacheable(
             with_negative,
             &error(VfsErrorCode::NotFound)

@@ -5,11 +5,11 @@ from pysandbox import (
   AddFuel,
   Output,
   PythonRuntime,
-  RuntimeExecutionError,
   RuntimeLimits,
   RuntimeResult,
   TerminationReason,
   WorkerCallOptions,
+  WorkerStoppedError,
 )
 
 
@@ -60,8 +60,6 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       failed = await runtime.execute("raise ValueError('guest failure')")
       self.assertIn("ValueError: guest failure", failed.error or "")
       self.assertEqual(failed.reason, TerminationReason.GUEST_ERROR)
-      with self.assertRaises(RuntimeExecutionError):
-        failed.raise_for_error()
 
       worker = runtime.run(
         "value = 10\n"
@@ -133,6 +131,103 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       )
     finally:
       await asyncio.gather(first.close(), second.close())
+      await runtime.close()
+
+  async def test_concurrent_worker_calls(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run(
+      "import asyncio\n"
+      "active = 0\n"
+      "maximum_active = 0\n"
+      "release = asyncio.Event()\n"
+      "async def held(value):\n"
+      "  global active, maximum_active\n"
+      "  active += 1\n"
+      "  maximum_active = max(maximum_active, active)\n"
+      "  try:\n"
+      "    await release.wait()\n"
+      "    return value\n"
+      "  finally:\n"
+      "    active -= 1\n"
+      "def release_calls():\n"
+      "  release.set()\n"
+      "def observed_concurrency():\n"
+      "  return maximum_active\n",
+      spin_concurrent=True,
+    )
+    first: asyncio.Task[object] | None = None
+    second: asyncio.Task[object] | None = None
+    try:
+      self.assertEqual(await worker.call(("observed_concurrency",), None), 0)
+      first = asyncio.create_task(worker.call(("held",), None, "first"))
+      second = asyncio.create_task(worker.call(("held",), None, "second"))
+      await asyncio.sleep(0.05)
+      await asyncio.wait_for(worker.call(("release_calls",), None), timeout=2)
+      self.assertEqual(await asyncio.gather(first, second), ["first", "second"])
+      self.assertEqual(await worker.call(("observed_concurrency",), None), 2)
+    finally:
+      for task in (first, second):
+        if task is not None:
+          task.cancel()
+      await worker.close()
+      await runtime.close()
+
+  async def test_worker_calls_fail_after_execution_stops(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run("raise ValueError('stopped')", spin=False)
+    try:
+      result = await worker.task
+      self.assertEqual(result.reason, TerminationReason.GUEST_ERROR)
+      with self.assertRaisesRegex(
+        WorkerStoppedError,
+        r"worker execution has stopped \(guest_error\)",
+      ):
+        await worker.call(("missing",), None)
+    finally:
+      await worker.close()
+      await runtime.close()
+
+  async def test_sequential_worker_calls(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run(
+      "def echo(value):\n"
+      "  return value\n",
+      spin_concurrent=False,
+    )
+    try:
+      self.assertEqual(await worker.call(("echo",), None, 1), 1)
+      self.assertEqual(await worker.call(("echo",), None, 2), 2)
+    finally:
+      await worker.close()
+      await runtime.close()
+
+  async def test_pending_call_fails_when_worker_stops(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run(
+      "import asyncio\n"
+      "started = asyncio.Event()\n"
+      "release = asyncio.Event()\n"
+      "async def held():\n"
+      "  started.set()\n"
+      "  await release.wait()\n"
+      "def is_started():\n"
+      "  return started.is_set()\n",
+    )
+    pending: asyncio.Task[object] | None = None
+    try:
+      self.assertFalse(await worker.call(("is_started",), None))
+      pending = asyncio.create_task(worker.call(("held",), None))
+      for _ in range(100):
+        if await worker.call(("is_started",), None):
+          break
+        await asyncio.sleep(0.01)
+      await worker.close()
+      with self.assertRaises(WorkerStoppedError):
+        await asyncio.wait_for(pending, timeout=2)
+    finally:
+      if pending is not None:
+        pending.cancel()
+      await worker.close()
       await runtime.close()
 
   async def test_host_dispatch_concurrency(self) -> None:
@@ -230,7 +325,8 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       await release.wait()
 
     worker = runtime.run(
-      "async def held_call():\n  await wait_on_host()\n  return 'done'\n"
+      "async def held_call():\n  await wait_on_host()\n  return 'done'\n",
+      spin_concurrent=False,
     )
     try:
       first = asyncio.create_task(worker.call(("held_call",), None))

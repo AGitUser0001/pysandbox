@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import inspect
 import sys
 import traceback
@@ -12,22 +13,41 @@ from wit_world.imports import host
 sys.dont_write_bytecode = True
 
 
-async def spin(namespace: dict[str, object]) -> None:
-  while (event := await host.spin_next()) is not None:
-    if event.call is None:
-      continue
-    request = event.call
-    try:
-      target: object = namespace
-      for part in request.path:
-        target = target[part] if isinstance(target, dict) else getattr(target, part)
-      args, kwargs = cbor2.loads(request.arguments)
-      value = target(*args, **kwargs)
-      if inspect.isawaitable(value):
-        value = await value
-      await host.worker_response(request.request_id, cbor2.dumps(value), None)
-    except Exception:
-      await host.worker_response(request.request_id, b"", traceback.format_exc())
+async def handle_worker_call(
+  namespace: dict[str, object],
+  request: object,
+) -> None:
+  try:
+    target: object = namespace
+    for part in request.path:
+      target = target[part] if isinstance(target, dict) else getattr(target, part)
+    args, kwargs = cbor2.loads(request.arguments)
+    value = target(*args, **kwargs)
+    if inspect.isawaitable(value):
+      value = await value
+    await host.worker_response(request.request_id, cbor2.dumps(value), None)
+  except Exception:
+    await host.worker_response(request.request_id, b"", traceback.format_exc())
+
+
+async def spin(namespace: dict[str, object], concurrent: bool) -> None:
+  tasks: set[asyncio.Task[None]] = set()
+  try:
+    while (event := await host.spin_next()) is not None:
+      if event.call is None:
+        continue
+      if not concurrent:
+        await handle_worker_call(namespace, event.call)
+        continue
+      task = asyncio.create_task(handle_worker_call(namespace, event.call))
+      tasks.add(task)
+      task.add_done_callback(tasks.discard)
+      await asyncio.sleep(0)
+  finally:
+    for task in tasks:
+      task.cancel()
+    if tasks:
+      await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def call(method: str, *args: object, **kwargs: object) -> object:
@@ -44,7 +64,7 @@ class WitWorld(wit_world.WitWorld):
       {
         "cbor2": cbor2,
         "call": call,
-        "spin": lambda: spin(self.namespace),
+        "spin": lambda concurrent: spin(self.namespace, concurrent),
       }
     )
     sys.modules["__main__"] = self.main_module

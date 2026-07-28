@@ -4,8 +4,6 @@ from .runtime import (
   Output,
   OutputEvent,
   PythonRuntime,
-  RuntimeError,
-  RuntimeExecutionError,
   RuntimeLimits,
   RuntimeResult,
   RuntimeSetupError,
@@ -13,6 +11,7 @@ from .runtime import (
   TerminationReason,
   Worker,
   WorkerCallOptions,
+  WorkerStoppedError,
 )
 from .vfs import VfsDirectoryEntry, VfsMetadata, VirtualFileSystem
 
@@ -23,8 +22,6 @@ __all__ = [
   "PythonRuntime",
   "RpcHandler",
   "RpcHost",
-  "RuntimeError",
-  "RuntimeExecutionError",
   "RuntimeLimits",
   "RuntimeResult",
   "RuntimeSetupError",
@@ -35,4 +32,5 @@ __all__ = [
   "VirtualFileSystem",
   "Worker",
   "WorkerCallOptions",
+  "WorkerStoppedError",
 ]

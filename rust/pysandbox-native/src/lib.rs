@@ -14,17 +14,19 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pysandbox_protocol::{
-    CancelRequest, ControlResult, DEFAULT_MAX_FRAME_BYTES, ExecuteRequest, ExecutionControl,
-    ExecutionLimits, Frame, FrameKind, FuelOperation, InvalidateVfs, OutputPayload, OutputSource,
-    RpcCall, RpcResult, TerminationReason, VfsDirectoryEntry, VfsError, VfsErrorCode, VfsMetadata,
-    VfsNodeKind, VfsRequest, VfsResponse, VfsValue, WorkerRpcCall, decode_payload, encode_payload,
-    read_frame, write_frame,
+    CancelRequest, ControlResult, DEFAULT_MAX_FRAME_BYTES, ExecuteRequest, ExecuteResult,
+    ExecutionControl, ExecutionLimits, Frame, FrameKind, FuelOperation, InvalidateVfs,
+    OutputPayload, OutputSource, RpcCall, RpcResult, TerminationReason, VfsDirectoryEntry,
+    VfsError, VfsErrorCode, VfsMetadata, VfsNodeKind, VfsRequest, VfsResponse, VfsValue,
+    WorkerRpcCall, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+pyo3::create_exception!(_core, WorkerStoppedError, PyRuntimeError);
 
 #[pyfunction]
 fn protocol_version() -> u16 {
@@ -459,14 +461,32 @@ fn start_sandbox<'py>(
 struct ConnectionRequest {
     frame: Frame,
     expected_kind: Option<FrameKind>,
-    response: oneshot::Sender<Result<Option<ConnectionResponse>, String>>,
+    response: oneshot::Sender<Result<Option<ConnectionResponse>, RequestError>>,
     output: Option<SharedOutput>,
 }
 
 struct PendingRequest {
+    worker_id: u64,
+    request_kind: FrameKind,
     expected_kind: FrameKind,
-    response: oneshot::Sender<Result<Option<ConnectionResponse>, String>>,
+    response: oneshot::Sender<Result<Option<ConnectionResponse>, RequestError>>,
     output: SharedOutput,
+}
+
+enum RequestError {
+    Runtime(String),
+    WorkerStopped(String),
+}
+
+impl RequestError {
+    fn into_pyerr(self) -> PyErr {
+        match self {
+            Self::Runtime(error) => PyRuntimeError::new_err(error),
+            Self::WorkerStopped(reason) => {
+                WorkerStoppedError::new_err(format!("worker execution has stopped ({reason})"))
+            }
+        }
+    }
 }
 
 struct ConnectionResponse {
@@ -535,6 +555,8 @@ fn spawn_connection_actor(
                                 pending.insert(
                                     frame.request_id,
                                     PendingRequest {
+                                        worker_id: frame.worker_id,
+                                        request_kind: frame.kind,
                                         expected_kind,
                                         response,
                                         output: output.unwrap_or_default(),
@@ -546,9 +568,12 @@ fn spawn_connection_actor(
 
                         if let Err(error) = write_frame(&mut writer, &frame).await {
                             if let Some(pending_request) = pending.remove(&frame.request_id) {
-                                let _ = pending_request.response.send(Err(error.to_string()));
+                                let _ = pending_request
+                                    .response
+                                    .send(Err(RequestError::Runtime(error.to_string())));
                             } else if let Some(response) = notification_response.take() {
-                                let _ = response.send(Err(error.to_string()));
+                                let _ =
+                                    response.send(Err(RequestError::Runtime(error.to_string())));
                             }
                             fail_pending_requests(&mut pending, error.to_string());
                             return;
@@ -594,7 +619,9 @@ fn spawn_connection_actor(
                                     let request = pending
                                         .remove(&frame.request_id)
                                         .expect("pending request was just found");
-                                    let _ = request.response.send(Err(error.to_string()));
+                                    let _ = request
+                                        .response
+                                        .send(Err(RequestError::Runtime(error.to_string())));
                                 }
                             }
                             continue;
@@ -624,18 +651,41 @@ fn spawn_connection_actor(
                             continue;
                         }
 
+                        if frame.kind == FrameKind::ExecuteResult {
+                            let reason = decode_payload::<ExecuteResult>(&frame.payload)
+                                .map(|result| termination_reason_name(result.reason))
+                                .unwrap_or("unknown");
+                            fail_pending_worker_calls(
+                                &mut pending,
+                                frame.worker_id,
+                                reason.into(),
+                            );
+                        } else if frame.kind == FrameKind::ControlResult
+                            && pending.get(&frame.request_id).is_some_and(|request| {
+                                request.request_kind == FrameKind::CloseWorker
+                            })
+                            && decode_payload::<ControlResult>(&frame.payload)
+                                .is_ok_and(|result| result.error.is_none())
+                        {
+                            fail_pending_worker_calls(
+                                &mut pending,
+                                frame.worker_id,
+                                "closed".into(),
+                            );
+                        }
+
                         let Some(request) = pending.remove(&frame.request_id) else {
                             continue;
                         };
                         if frame.kind == FrameKind::Error {
                             let error = String::from_utf8_lossy(&frame.payload).into_owned();
-                            let _ = request.response.send(Err(error));
+                            let _ = request.response.send(Err(RequestError::Runtime(error)));
                         } else if frame.kind != request.expected_kind {
-                            let _ = request.response.send(Err(format!(
+                            let _ = request.response.send(Err(RequestError::Runtime(format!(
                                 "expected {:?}, received {:?}",
                                 request.expected_kind,
                                 frame.kind,
-                            )));
+                            ))));
                         } else {
                             let _ = request.response.send(Ok(Some(ConnectionResponse {
                                 frame,
@@ -955,13 +1005,37 @@ async fn request_with_output(
     let response = receiver
         .await
         .map_err(|_| PyRuntimeError::new_err("sandbox connection stopped"))?
-        .map_err(PyRuntimeError::new_err)?;
+        .map_err(RequestError::into_pyerr)?;
     Ok(response)
 }
 
 fn fail_pending_requests(pending: &mut HashMap<u64, PendingRequest>, error: String) {
     for (_, request) in pending.drain() {
-        let _ = request.response.send(Err(error.clone()));
+        let _ = request
+            .response
+            .send(Err(RequestError::Runtime(error.clone())));
+    }
+}
+
+fn fail_pending_worker_calls(
+    pending: &mut HashMap<u64, PendingRequest>,
+    worker_id: u64,
+    reason: String,
+) {
+    let request_ids = pending
+        .iter()
+        .filter_map(|(request_id, request)| {
+            (request.worker_id == worker_id && request.expected_kind == FrameKind::WorkerResponse)
+                .then_some(*request_id)
+        })
+        .collect::<Vec<_>>();
+    for request_id in request_ids {
+        let request = pending
+            .remove(&request_id)
+            .expect("pending worker request was just found");
+        let _ = request
+            .response
+            .send(Err(RequestError::WorkerStopped(reason.clone())));
     }
 }
 
@@ -1369,6 +1443,10 @@ fn timeout_milliseconds(timeout: Option<f64>) -> PyResult<Option<u64>> {
 
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add(
+        "WorkerStoppedError",
+        module.py().get_type::<WorkerStoppedError>(),
+    )?;
     module.add_class::<NativeExecution>()?;
     module.add_class::<NativeExecutionResult>()?;
     module.add_class::<NativeOutputEvent>()?;

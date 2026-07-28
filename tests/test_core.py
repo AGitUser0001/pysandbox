@@ -27,7 +27,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
       sandbox = await _core.start_sandbox(
         sys.executable,
         socket_name,
-        project_root / "component" / "pysandbox.wasm",
+        project_root / "pysandbox" / "_runtime" / "pysandbox.wasm",
         project_root / "vendor" / "cpython" / "Lib",
         executable_arguments=["-m", "pysandbox._sandboxd"],
         worker_queue_capacity=1,
@@ -102,7 +102,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         "def large_result():\n"
         "  return 'too large'\n"
         'print("spin-ready", flush=True)\n'
-        "await spin()",
+        "await spin(concurrent=True)",
         worker_id=0,
       )
       for _ in range(1_000):

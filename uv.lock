@@ -57,7 +57,7 @@ wheels = [
 
 [[package]]
 name = "pysandbox"
-version = "1.0.2"
+version = "1.1"
 source = { editable = "." }
 dependencies = [
     { name = "cbor2" },

@@ -20,8 +20,6 @@ __all__ = [
   "Output",
   "OutputEvent",
   "PythonRuntime",
-  "RuntimeError",
-  "RuntimeExecutionError",
   "RuntimeLimits",
   "RuntimeResult",
   "RuntimeSetupError",
@@ -29,19 +27,15 @@ __all__ = [
   "TerminationReason",
   "Worker",
   "WorkerCallOptions",
+  "WorkerStoppedError",
 ]
 
 
-class RuntimeError(Exception):
-  """Base error for sandbox lifecycle and execution failures."""
-
-
-class RuntimeSetupError(RuntimeError):
+class RuntimeSetupError(Exception):
   """Raised when the packaged sandbox runtime cannot be started."""
 
 
-class RuntimeExecutionError(RuntimeError):
-  """Raised when guest execution fails."""
+WorkerStoppedError = _core.WorkerStoppedError
 
 
 class TerminationReason(StrEnum):
@@ -174,11 +168,6 @@ class RuntimeResult:
   ) -> str:
     return self.output.formatted_text(stdout=stdout, stderr=stderr)
 
-  def raise_for_error(self) -> None:
-    if self.error is not None:
-      raise RuntimeExecutionError(self.error)
-
-
 class PythonRuntime:
   def __init__(
     self,
@@ -221,8 +210,15 @@ class PythonRuntime:
     program: str,
     *,
     limits: RuntimeLimits | None = None,
+    spin: bool = False,
+    spin_concurrent: bool = True,
   ) -> RuntimeResult:
-    worker = self._run(program, limits=limits, spin=False, transient=True)
+    worker = self._run(
+      program,
+      limits=limits,
+      spin=spin,
+      spin_concurrent=spin_concurrent,
+    )
     return await worker.task
 
   def run(
@@ -230,8 +226,15 @@ class PythonRuntime:
     program: str,
     *,
     limits: RuntimeLimits | None = None,
+    spin: bool = True,
+    spin_concurrent: bool = True,
   ) -> "Worker":
-    return self._run(program, limits=limits, spin=True, transient=False)
+    return self._run(
+      program,
+      limits=limits,
+      spin=spin,
+      spin_concurrent=spin_concurrent,
+    )
 
   async def close(self) -> None:
     sandbox, self._sandbox = self._sandbox, None
@@ -268,15 +271,18 @@ class PythonRuntime:
     *,
     limits: RuntimeLimits | None,
     spin: bool,
-    transient: bool,
+    spin_concurrent: bool,
   ) -> "Worker":
     asyncio.get_running_loop()
     return Worker(
       runtime=self,
       worker_id=next(self._worker_ids),
-      program=self._prepare_program(program, spin=spin),
+      program=self._prepare_program(
+        program,
+        spin=spin,
+        spin_concurrent=spin_concurrent,
+      ),
       limits=limits or RuntimeLimits(),
-      transient=transient,
     )
 
   async def _get_sandbox(self) -> _core.SandboxProcess:
@@ -333,7 +339,13 @@ class PythonRuntime:
     if self._sandbox is not None:
       self._sandbox.expose(method, handler)
 
-  def _prepare_program(self, program: str, *, spin: bool) -> str:
+  def _prepare_program(
+    self,
+    program: str,
+    *,
+    spin: bool,
+    spin_concurrent: bool,
+  ) -> str:
     proxies = [
       (
         f"async def {method}(*args, **kwargs):\n"
@@ -344,7 +356,7 @@ class PythonRuntime:
     ]
     source = "".join(proxies) + program
     if spin:
-      source += "\nawait spin()\n"
+      source += f"\nawait spin(concurrent={spin_concurrent!r})\n"
     return source
 
 
@@ -356,14 +368,12 @@ class Worker:
     worker_id: int,
     program: str,
     limits: RuntimeLimits,
-    transient: bool,
   ) -> None:
     self.runtime = runtime
     self.worker_id = worker_id
     self.result = RuntimeResult()
     self._program = program
     self._limits = limits
-    self._transient = transient
     self._execution: asyncio.Future[_core.Execution] = (
       asyncio.get_running_loop().create_future()
     )
@@ -390,6 +400,10 @@ class Worker:
   ) -> object:
     if options is not None and options.timeout is not None and options.timeout <= 0:
       raise ValueError("worker call timeout must be positive")
+    if self.task.done():
+      raise WorkerStoppedError(
+        f"worker execution has stopped ({self.result.reason.value})"
+      )
     execution = await self._execution
     fuel = native_fuel_operation(options.fuel if options is not None else None)
     call = execution.call(path, fuel, *args, **kwargs)
@@ -452,14 +466,9 @@ class Worker:
         self.result.error = native_result.error
         self.result.reason = TerminationReason(native_result.reason)
         return self.result
-      except asyncio.CancelledError:
+      finally:
         with suppress(Exception):
           await sandbox.close_worker(self.worker_id)
-        raise
-      finally:
-        if self._transient:
-          with suppress(Exception):
-            await sandbox.close_worker(self.worker_id)
     except BaseException as error:
       if not self._execution.done():
         if isinstance(error, asyncio.CancelledError):

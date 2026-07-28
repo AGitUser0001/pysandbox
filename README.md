@@ -28,7 +28,6 @@ async def main() -> None:
       'print("2 + 5 =", await add(2, 5), flush=True)',
       limits=RuntimeLimits(timeout=30),
     )
-    result.raise_for_error()
     print(result.text, end="")
   finally:
     await runtime.close()
@@ -62,6 +61,17 @@ await worker.close()
 
 The worker preserves its Python globals between calls. `worker.task` resolves
 when the guest exits, and `worker.output` exposes output collected so far.
+Calls made after the worker stops, or still pending when it closes, raise
+`WorkerStoppedError`.
+Worker calls are dispatched concurrently by default. Pass
+`spin_concurrent=False` to process them sequentially:
+
+```python
+worker = runtime.run(program, spin_concurrent=False)
+```
+
+Both `execute()` and `run()` accept `spin`. It defaults to `False` for
+one-shot execution and `True` for persistent workers.
 
 The positional options slot controls the call without reserving guest keyword
 arguments:
