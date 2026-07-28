@@ -1,10 +1,13 @@
+import signal
 import sys
 from pathlib import Path
 
-from . import _core
-
 
 def main() -> None:
+  ignore_terminal_signals()
+
+  from . import _core
+
   if len(sys.argv) != 8:
     raise SystemExit(
       "usage: python -m pysandbox._sandboxd "
@@ -20,6 +23,13 @@ def main() -> None:
     sys.argv[6] == "true",
     sys.argv[7] == "true",
   )
+
+
+def ignore_terminal_signals() -> None:
+  for name in ("SIGINT", "SIGHUP"):
+    terminal_signal = getattr(signal, name, None)
+    if terminal_signal is not None:
+      signal.signal(terminal_signal, signal.SIG_IGN)
 
 
 if __name__ == "__main__":
