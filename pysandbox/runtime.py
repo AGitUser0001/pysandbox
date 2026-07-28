@@ -4,7 +4,7 @@ import keyword
 import sys
 import tempfile
 from collections import UserList
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Self
 
 from . import _core
-from .rpc import RpcHandler, RpcHost
+from .rpc import RpcHost
 from .vfs import VirtualFileSystem
 
 __all__ = [
@@ -345,7 +345,11 @@ class PythonRuntime:
       self._socket_directory.cleanup()
       self._socket_directory = None
 
-  def _register_handler(self, method: str, handler: RpcHandler) -> None:
+  def _register_handler(
+    self,
+    method: str,
+    handler: Callable[..., object],
+  ) -> None:
     if self._sandbox is not None:
       self._sandbox.expose(method, handler)
 
