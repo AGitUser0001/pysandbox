@@ -178,6 +178,8 @@ class PythonRuntime:
     worker_queue_capacity: int = 256,
     host_dispatch_concurrency: int = 64,
     host_dispatch_queue_capacity: int = 256,
+    guest_dispatch_request_concurrency: int = 16,
+    guest_dispatch_request_queue_capacity: int = 64,
     vfs: VirtualFileSystem | None = None,
     cache_vfs: bool = False,
     cache_vfs_negative: bool = False,
@@ -190,10 +192,18 @@ class PythonRuntime:
       raise ValueError("host_dispatch_concurrency must be positive")
     if host_dispatch_queue_capacity <= 0:
       raise ValueError("host_dispatch_queue_capacity must be positive")
+    if guest_dispatch_request_concurrency <= 0:
+      raise ValueError("guest_dispatch_request_concurrency must be positive")
+    if guest_dispatch_request_queue_capacity <= 0:
+      raise ValueError(
+        "guest_dispatch_request_queue_capacity must be positive",
+      )
     self.max_ipc_frame_bytes = max_ipc_frame_bytes
     self.worker_queue_capacity = worker_queue_capacity
     self.host_dispatch_concurrency = host_dispatch_concurrency
     self.host_dispatch_queue_capacity = host_dispatch_queue_capacity
+    self.guest_dispatch_request_concurrency = guest_dispatch_request_concurrency
+    self.guest_dispatch_request_queue_capacity = guest_dispatch_request_queue_capacity
     self.vfs = vfs
     self.cache_vfs = cache_vfs
     self.cache_vfs_negative = cache_vfs_negative
@@ -325,6 +335,10 @@ class PythonRuntime:
           worker_queue_capacity=self.worker_queue_capacity,
           host_dispatch_concurrency=self.host_dispatch_concurrency,
           host_dispatch_queue_capacity=self.host_dispatch_queue_capacity,
+          guest_dispatch_request_concurrency=(self.guest_dispatch_request_concurrency),
+          guest_dispatch_request_queue_capacity=(
+            self.guest_dispatch_request_queue_capacity
+          ),
           cache_vfs=self.cache_vfs,
           cache_vfs_negative=self.cache_vfs_negative,
         )

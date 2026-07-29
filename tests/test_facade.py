@@ -22,6 +22,16 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       PythonRuntime(host_dispatch_concurrency=0)
     with self.assertRaisesRegex(ValueError, "host_dispatch_queue_capacity"):
       PythonRuntime(host_dispatch_queue_capacity=0)
+    with self.assertRaisesRegex(
+      ValueError,
+      "guest_dispatch_request_concurrency",
+    ):
+      PythonRuntime(guest_dispatch_request_concurrency=0)
+    with self.assertRaisesRegex(
+      ValueError,
+      "guest_dispatch_request_queue_capacity",
+    ):
+      PythonRuntime(guest_dispatch_request_queue_capacity=0)
 
   async def test_execution_rpc_worker_and_output(self) -> None:
     runtime = PythonRuntime()
@@ -366,6 +376,105 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(maximum_active, 2)
     finally:
       release.set()
+      await runtime.close()
+
+  async def test_guest_dispatch_request_concurrency(self) -> None:
+    runtime = PythonRuntime(
+      host_dispatch_concurrency=8,
+      guest_dispatch_request_concurrency=2,
+    )
+    active = 0
+    maximum_active = 0
+    two_active = asyncio.Event()
+    release = asyncio.Event()
+
+    @runtime.rpc.expose
+    async def locally_held(context: RpcContext, /) -> None:
+      nonlocal active, maximum_active
+      active += 1
+      maximum_active = max(maximum_active, active)
+      if active == 2:
+        two_active.set()
+      try:
+        await release.wait()
+      finally:
+        active -= 1
+
+    execution: asyncio.Task[RuntimeResult] | None = None
+    try:
+      execution = asyncio.create_task(
+        runtime.execute(
+          "import asyncio\nawait asyncio.gather(*(locally_held() for _ in range(6)))",
+        )
+      )
+      await asyncio.wait_for(two_active.wait(), timeout=5)
+      await asyncio.sleep(0.05)
+      self.assertEqual(maximum_active, 2)
+      release.set()
+      result = await execution
+      self.assertIsNone(result.error)
+      self.assertEqual(maximum_active, 2)
+    finally:
+      release.set()
+      if execution is not None:
+        await asyncio.gather(execution, return_exceptions=True)
+      await runtime.close()
+
+  async def test_guest_dispatch_overload_is_isolated_per_worker(self) -> None:
+    runtime = PythonRuntime(
+      host_dispatch_concurrency=8,
+      host_dispatch_queue_capacity=32,
+      guest_dispatch_request_concurrency=1,
+      guest_dispatch_request_queue_capacity=1,
+    )
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+
+    @runtime.rpc.expose
+    async def locally_saturated(
+      context: RpcContext,
+      /,
+      value: str,
+    ) -> str:
+      if value == "hold":
+        first_started.set()
+        await release.wait()
+      return value
+
+    saturated: asyncio.Task[RuntimeResult] | None = None
+    try:
+      saturated = asyncio.create_task(
+        runtime.execute(
+          "import asyncio\n"
+          "results = await asyncio.gather(\n"
+          "  locally_saturated('hold'),\n"
+          "  locally_saturated('queued'),\n"
+          "  locally_saturated('overload'),\n"
+          "  return_exceptions=True,\n"
+          ")\n"
+          "print(*(str(result) for result in results), sep='\\n', flush=True)",
+        )
+      )
+      await asyncio.wait_for(first_started.wait(), timeout=5)
+
+      unaffected = await asyncio.wait_for(
+        runtime.execute("print(await locally_saturated('other'), flush=True)"),
+        timeout=2,
+      )
+      self.assertIsNone(unaffected.error)
+      self.assertEqual(unaffected.stdout, b"other\n")
+
+      release.set()
+      saturated_result = await saturated
+      self.assertIsNone(saturated_result.error)
+      self.assertIn(
+        b"guest dispatch request queue is full",
+        saturated_result.stdout,
+      )
+    finally:
+      release.set()
+      if saturated is not None:
+        await asyncio.gather(saturated, return_exceptions=True)
       await runtime.close()
 
   async def test_host_dispatch_overload_does_not_block_connection(self) -> None:

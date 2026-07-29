@@ -111,6 +111,8 @@ def start_sandbox(
   worker_queue_capacity: int = 256,
   host_dispatch_concurrency: int = 64,
   host_dispatch_queue_capacity: int = 256,
+  guest_dispatch_request_concurrency: int = 16,
+  guest_dispatch_request_queue_capacity: int = 64,
   cache_vfs: bool = False,
   cache_vfs_negative: bool = False,
 ) -> Awaitable[SandboxProcess]: ...

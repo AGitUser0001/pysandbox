@@ -183,6 +183,11 @@ runtime = PythonRuntime(host_dispatch_concurrency=64)
 When that queue is full, guest RPC and VFS operations receive an immediate
 overload error while connection routing remains responsive.
 
+`guest_dispatch_request_concurrency` and
+`guest_dispatch_request_queue_capacity` apply the same controls independently
+to each worker. RPC and VFS requests share the worker's limits, preventing one
+guest from consuming the sandbox-wide host dispatch budget.
+
 ## Internals
 
 - A PyO3 extension supervises a Rust sandbox subprocess without blocking the

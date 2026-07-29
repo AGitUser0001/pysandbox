@@ -21,7 +21,7 @@ use pysandbox_protocol::{
     WorkerRpcCall, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -389,6 +389,8 @@ impl SandboxProcess {
     worker_queue_capacity = 256,
     host_dispatch_concurrency = 64,
     host_dispatch_queue_capacity = 256,
+    guest_dispatch_request_concurrency = 16,
+    guest_dispatch_request_queue_capacity = 64,
     cache_vfs = false,
     cache_vfs_negative = false,
 ))]
@@ -403,6 +405,8 @@ fn start_sandbox<'py>(
     worker_queue_capacity: usize,
     host_dispatch_concurrency: usize,
     host_dispatch_queue_capacity: usize,
+    guest_dispatch_request_concurrency: usize,
+    guest_dispatch_request_queue_capacity: usize,
     cache_vfs: bool,
     cache_vfs_negative: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
@@ -419,6 +423,16 @@ fn start_sandbox<'py>(
     if host_dispatch_queue_capacity == 0 {
         return Err(PyValueError::new_err(
             "host_dispatch_queue_capacity must be positive",
+        ));
+    }
+    if guest_dispatch_request_concurrency == 0 {
+        return Err(PyValueError::new_err(
+            "guest_dispatch_request_concurrency must be positive",
+        ));
+    }
+    if guest_dispatch_request_queue_capacity == 0 {
+        return Err(PyValueError::new_err(
+            "guest_dispatch_request_queue_capacity must be positive",
         ));
     }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -442,6 +456,8 @@ fn start_sandbox<'py>(
             host_dispatch,
             max_ipc_frame_bytes,
             closed.clone(),
+            guest_dispatch_request_concurrency,
+            guest_dispatch_request_queue_capacity,
         );
         let rpc_handlers = Arc::new(StdMutex::new(HashMap::new()));
         let vfs_handler = Arc::new(StdMutex::new(None));
@@ -512,16 +528,24 @@ enum HostDispatchRequest {
     Vfs(Frame),
 }
 
+struct AdmittedHostDispatchRequest {
+    request: HostDispatchRequest,
+    _guest_dispatch_permit: OwnedSemaphorePermit,
+}
+
 fn spawn_connection_actor(
     connection: Stream,
-    host_dispatch: mpsc::Sender<HostDispatchRequest>,
+    host_dispatch: mpsc::Sender<AdmittedHostDispatchRequest>,
     max_ipc_frame_bytes: usize,
     closed: Arc<AtomicBool>,
+    guest_dispatch_request_concurrency: usize,
+    guest_dispatch_request_queue_capacity: usize,
 ) -> (mpsc::Sender<ConnectionRequest>, watch::Sender<bool>) {
     let (requests, mut request_receiver) = mpsc::channel::<ConnectionRequest>(64);
     let (incoming, mut incoming_receiver) = mpsc::channel(64);
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
     let actor_shutdown = shutdown.clone();
+    let connection_requests = requests.clone();
     let (mut reader, mut writer) = connection.split();
 
     tokio::spawn(async move {
@@ -538,6 +562,7 @@ fn spawn_connection_actor(
 
     tokio::spawn(async move {
         let mut pending = HashMap::<u64, PendingRequest>::new();
+        let mut guest_dispatchers = HashMap::<u64, mpsc::Sender<HostDispatchRequest>>::new();
         async {
             loop {
                 tokio::select! {
@@ -640,18 +665,32 @@ fn spawn_connection_actor(
                         }
 
                         if matches!(frame.kind, FrameKind::GuestCall | FrameKind::VfsRequest) {
+                            let worker_id = frame.worker_id;
                             let request = if frame.kind == FrameKind::GuestCall {
                                 HostDispatchRequest::GuestCall(frame)
                             } else {
                                 HostDispatchRequest::Vfs(frame)
                             };
-                            if let Err(error) = host_dispatch.try_send(request) {
+                            let guest_dispatch = guest_dispatchers
+                                .entry(worker_id)
+                                .or_insert_with(|| {
+                                    spawn_guest_dispatcher(
+                                        host_dispatch.clone(),
+                                        connection_requests.clone(),
+                                        guest_dispatch_request_concurrency,
+                                        guest_dispatch_request_queue_capacity,
+                                    )
+                                });
+                            if let Err(error) = guest_dispatch.try_send(request) {
                                 let (request, message) = match error {
                                     mpsc::error::TrySendError::Full(request) => {
-                                        (request, "host dispatch queue is full")
+                                        (
+                                            request,
+                                            "guest dispatch request queue is full",
+                                        )
                                     }
                                     mpsc::error::TrySendError::Closed(request) => {
-                                        (request, "host dispatcher stopped")
+                                        (request, "guest dispatcher stopped")
                                     }
                                 };
                                 let response = host_dispatch_error_response(request, message);
@@ -664,6 +703,7 @@ fn spawn_connection_actor(
                         }
 
                         if frame.kind == FrameKind::ExecuteResult {
+                            guest_dispatchers.remove(&frame.worker_id);
                             let reason = decode_payload::<ExecuteResult>(&frame.payload)
                                 .map(|result| termination_reason_name(result.reason))
                                 .unwrap_or("unknown");
@@ -679,6 +719,7 @@ fn spawn_connection_actor(
                             && decode_payload::<ControlResult>(&frame.payload)
                                 .is_ok_and(|result| result.error.is_none())
                         {
+                            guest_dispatchers.remove(&frame.worker_id);
                             fail_pending_worker_calls(
                                 &mut pending,
                                 frame.worker_id,
@@ -716,7 +757,7 @@ fn spawn_connection_actor(
 }
 
 fn spawn_host_dispatcher(
-    mut host_dispatch_requests: mpsc::Receiver<HostDispatchRequest>,
+    mut host_dispatch_requests: mpsc::Receiver<AdmittedHostDispatchRequest>,
     requests: mpsc::Sender<ConnectionRequest>,
     handlers: RpcHandlers,
     handler: VfsHandler,
@@ -735,7 +776,8 @@ fn spawn_host_dispatcher(
             let handler = handler.clone();
             pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                 let _permit = permit;
-                match dispatch_request {
+                let _guest_dispatch_permit = dispatch_request._guest_dispatch_permit;
+                match dispatch_request.request {
                     HostDispatchRequest::GuestCall(frame) => {
                         dispatch_guest_call(frame, &requests, &handlers).await;
                     }
@@ -746,6 +788,43 @@ fn spawn_host_dispatcher(
             });
         }
     });
+}
+
+fn spawn_guest_dispatcher(
+    host_dispatch: mpsc::Sender<AdmittedHostDispatchRequest>,
+    requests: mpsc::Sender<ConnectionRequest>,
+    concurrency: usize,
+    queue_capacity: usize,
+) -> mpsc::Sender<HostDispatchRequest> {
+    let (sender, mut receiver) = mpsc::channel(queue_capacity);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        loop {
+            let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                return;
+            };
+            let Some(request_to_dispatch) = receiver.recv().await else {
+                return;
+            };
+            let admitted = AdmittedHostDispatchRequest {
+                request: request_to_dispatch,
+                _guest_dispatch_permit: permit,
+            };
+            if let Err(error) = host_dispatch.try_send(admitted) {
+                let (admitted, message) = match error {
+                    mpsc::error::TrySendError::Full(admitted) => {
+                        (admitted, "host dispatch queue is full")
+                    }
+                    mpsc::error::TrySendError::Closed(admitted) => {
+                        (admitted, "host dispatcher stopped")
+                    }
+                };
+                let response = host_dispatch_error_response(admitted.request, message);
+                let _ = request(&requests, response, None).await;
+            }
+        }
+    });
+    sender
 }
 
 async fn dispatch_guest_call(
