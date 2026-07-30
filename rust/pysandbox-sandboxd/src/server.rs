@@ -335,6 +335,7 @@ fn spawn_worker(
         let mut worker = match ComponentWorker::load(
             &runtime,
             &python_root,
+            worker_id,
             rpc,
             actor_control,
             control_receiver,

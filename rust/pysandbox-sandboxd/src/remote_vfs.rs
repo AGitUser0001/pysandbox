@@ -27,6 +27,7 @@ enum CacheKey {
 
 #[derive(Clone)]
 pub(crate) struct RemoteVfs {
+    worker_id: u64,
     outgoing: mpsc::Sender<Frame>,
     next_request_id: Arc<AtomicU64>,
     pending: PendingVfsRequests,
@@ -43,6 +44,7 @@ impl RemoteVfs {
         policy: CachePolicy,
     ) -> Self {
         Self {
+            worker_id: 0,
             outgoing,
             next_request_id,
             pending,
@@ -50,6 +52,12 @@ impl RemoteVfs {
             generation: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn for_worker(&self, worker_id: u64) -> Self {
+        let mut vfs = self.clone();
+        vfs.worker_id = worker_id;
+        vfs
     }
 
     pub(crate) async fn accept_response(&self, request_id: u64, response: VfsResponse) {
@@ -90,7 +98,12 @@ impl RemoteVfs {
         self.pending.lock().await.insert(request_id, sender);
         if self
             .outgoing
-            .send(Frame::new(FrameKind::VfsRequest, 0, request_id, payload))
+            .send(Frame::new(
+                FrameKind::VfsRequest,
+                self.worker_id,
+                request_id,
+                payload,
+            ))
             .await
             .is_err()
         {

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -69,6 +69,8 @@ pub struct ExecutionLimits {
     pub max_memory_bytes: u64,
     pub max_output_bytes: u64,
     pub max_guest_rpc_bytes: u64,
+    pub guest_dispatch_request_concurrency: u64,
+    pub guest_dispatch_request_queue_capacity: u64,
     pub fuel: u64,
     pub timeout_ms: Option<u64>,
 }
@@ -79,6 +81,8 @@ impl Default for ExecutionLimits {
             max_memory_bytes: 128 * 1024 * 1024,
             max_output_bytes: 256 * 1024,
             max_guest_rpc_bytes: 10 * 1024 * 1024,
+            guest_dispatch_request_concurrency: 16,
+            guest_dispatch_request_queue_capacity: 64,
             fuel: u64::MAX,
             timeout_ms: None,
         }

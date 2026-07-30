@@ -186,7 +186,8 @@ overload error while connection routing remains responsive.
 `guest_dispatch_request_concurrency` and
 `guest_dispatch_request_queue_capacity` apply the same controls independently
 to each worker. RPC and VFS requests share the worker's limits, preventing one
-guest from consuming the sandbox-wide host dispatch budget.
+guest from consuming the sandbox-wide host dispatch budget. Configure them on
+the execution's `RuntimeLimits`.
 
 ## Internals
 

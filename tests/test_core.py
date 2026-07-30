@@ -12,7 +12,7 @@ from pysandbox.runtime import TerminationReason
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
   def test_protocol_version(self) -> None:
-    self.assertEqual(_core.protocol_version(), 2)
+    self.assertEqual(_core.protocol_version(), 3)
 
   async def test_tokio_awaitable(self) -> None:
     self.assertIsNone(await _core.sleep(0))

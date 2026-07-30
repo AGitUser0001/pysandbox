@@ -183,6 +183,8 @@ impl SandboxProcess {
         max_memory_bytes = 128 * 1024 * 1024,
         max_output_bytes = 256 * 1024,
         max_guest_rpc_bytes = 10 * 1024 * 1024,
+        guest_dispatch_request_concurrency = 16,
+        guest_dispatch_request_queue_capacity = 64,
         fuel = u64::MAX,
         timeout = None,
     ))]
@@ -196,6 +198,8 @@ impl SandboxProcess {
         max_memory_bytes: u64,
         max_output_bytes: u64,
         max_guest_rpc_bytes: u64,
+        guest_dispatch_request_concurrency: u64,
+        guest_dispatch_request_queue_capacity: u64,
         fuel: u64,
         timeout: Option<f64>,
     ) -> PyResult<Py<NativeExecution>> {
@@ -207,6 +211,10 @@ impl SandboxProcess {
         let (result_sender, result) = watch::channel(None);
         let requests = self.requests.clone();
         let timeout_ms = timeout_milliseconds(timeout)?;
+        validate_guest_dispatch_limits(
+            guest_dispatch_request_concurrency,
+            guest_dispatch_request_queue_capacity,
+        )?;
         let payload = encode_payload(&ExecuteRequest {
             program,
             rpc_methods,
@@ -214,6 +222,8 @@ impl SandboxProcess {
                 max_memory_bytes,
                 max_output_bytes,
                 max_guest_rpc_bytes,
+                guest_dispatch_request_concurrency,
+                guest_dispatch_request_queue_capacity,
                 fuel,
                 timeout_ms,
             },
@@ -249,6 +259,8 @@ impl SandboxProcess {
         max_memory_bytes = 128 * 1024 * 1024,
         max_output_bytes = 256 * 1024,
         max_guest_rpc_bytes = 10 * 1024 * 1024,
+        guest_dispatch_request_concurrency = 16,
+        guest_dispatch_request_queue_capacity = 64,
         fuel = u64::MAX,
         timeout = None,
     ))]
@@ -262,6 +274,8 @@ impl SandboxProcess {
         max_memory_bytes: u64,
         max_output_bytes: u64,
         max_guest_rpc_bytes: u64,
+        guest_dispatch_request_concurrency: u64,
+        guest_dispatch_request_queue_capacity: u64,
         fuel: u64,
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -269,6 +283,10 @@ impl SandboxProcess {
         let closed = self.closed.clone();
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let timeout_ms = timeout_milliseconds(timeout)?;
+        validate_guest_dispatch_limits(
+            guest_dispatch_request_concurrency,
+            guest_dispatch_request_queue_capacity,
+        )?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if closed.load(Ordering::Acquire) {
@@ -282,6 +300,8 @@ impl SandboxProcess {
                     max_memory_bytes,
                     max_output_bytes,
                     max_guest_rpc_bytes,
+                    guest_dispatch_request_concurrency,
+                    guest_dispatch_request_queue_capacity,
                     fuel,
                     timeout_ms,
                 },
@@ -389,8 +409,6 @@ impl SandboxProcess {
     worker_queue_capacity = 256,
     host_dispatch_concurrency = 64,
     host_dispatch_queue_capacity = 256,
-    guest_dispatch_request_concurrency = 16,
-    guest_dispatch_request_queue_capacity = 64,
     cache_vfs = false,
     cache_vfs_negative = false,
 ))]
@@ -405,8 +423,6 @@ fn start_sandbox<'py>(
     worker_queue_capacity: usize,
     host_dispatch_concurrency: usize,
     host_dispatch_queue_capacity: usize,
-    guest_dispatch_request_concurrency: usize,
-    guest_dispatch_request_queue_capacity: usize,
     cache_vfs: bool,
     cache_vfs_negative: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
@@ -423,16 +439,6 @@ fn start_sandbox<'py>(
     if host_dispatch_queue_capacity == 0 {
         return Err(PyValueError::new_err(
             "host_dispatch_queue_capacity must be positive",
-        ));
-    }
-    if guest_dispatch_request_concurrency == 0 {
-        return Err(PyValueError::new_err(
-            "guest_dispatch_request_concurrency must be positive",
-        ));
-    }
-    if guest_dispatch_request_queue_capacity == 0 {
-        return Err(PyValueError::new_err(
-            "guest_dispatch_request_queue_capacity must be positive",
         ));
     }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -456,8 +462,6 @@ fn start_sandbox<'py>(
             host_dispatch,
             max_ipc_frame_bytes,
             closed.clone(),
-            guest_dispatch_request_concurrency,
-            guest_dispatch_request_queue_capacity,
         );
         let rpc_handlers = Arc::new(StdMutex::new(HashMap::new()));
         let vfs_handler = Arc::new(StdMutex::new(None));
@@ -538,8 +542,6 @@ fn spawn_connection_actor(
     host_dispatch: mpsc::Sender<AdmittedHostDispatchRequest>,
     max_ipc_frame_bytes: usize,
     closed: Arc<AtomicBool>,
-    guest_dispatch_request_concurrency: usize,
-    guest_dispatch_request_queue_capacity: usize,
 ) -> (mpsc::Sender<ConnectionRequest>, watch::Sender<bool>) {
     let (requests, mut request_receiver) = mpsc::channel::<ConnectionRequest>(64);
     let (incoming, mut incoming_receiver) = mpsc::channel(64);
@@ -563,6 +565,7 @@ fn spawn_connection_actor(
     tokio::spawn(async move {
         let mut pending = HashMap::<u64, PendingRequest>::new();
         let mut guest_dispatchers = HashMap::<u64, mpsc::Sender<HostDispatchRequest>>::new();
+        let mut guest_dispatch_limits = HashMap::<u64, (usize, usize)>::new();
         async {
             loop {
                 tokio::select! {
@@ -586,6 +589,27 @@ fn spawn_connection_actor(
                             response,
                             output,
                         } = request;
+                        if frame.kind == FrameKind::Execute
+                            && let Ok(request) =
+                                decode_payload::<ExecuteRequest>(&frame.payload)
+                            && let (Ok(concurrency), Ok(queue_capacity)) = (
+                                usize::try_from(
+                                    request
+                                        .limits
+                                        .guest_dispatch_request_concurrency,
+                                ),
+                                usize::try_from(
+                                    request
+                                        .limits
+                                        .guest_dispatch_request_queue_capacity,
+                                ),
+                            )
+                        {
+                            guest_dispatch_limits.insert(
+                                frame.worker_id,
+                                (concurrency, queue_capacity),
+                            );
+                        }
                         let mut notification_response = None;
                         match expected_kind {
                             Some(expected_kind) => {
@@ -671,14 +695,32 @@ fn spawn_connection_actor(
                             } else {
                                 HostDispatchRequest::Vfs(frame)
                             };
+                            let Some(&(concurrency, queue_capacity)) =
+                                guest_dispatch_limits.get(&worker_id)
+                            else {
+                                let response = host_dispatch_error_response(
+                                    request,
+                                    "guest dispatch limits are unavailable",
+                                );
+                                if let Err(error) =
+                                    write_frame(&mut writer, &response).await
+                                {
+                                    fail_pending_requests(
+                                        &mut pending,
+                                        error.to_string(),
+                                    );
+                                    return;
+                                }
+                                continue;
+                            };
                             let guest_dispatch = guest_dispatchers
                                 .entry(worker_id)
                                 .or_insert_with(|| {
                                     spawn_guest_dispatcher(
                                         host_dispatch.clone(),
                                         connection_requests.clone(),
-                                        guest_dispatch_request_concurrency,
-                                        guest_dispatch_request_queue_capacity,
+                                        concurrency,
+                                        queue_capacity,
                                     )
                                 });
                             if let Err(error) = guest_dispatch.try_send(request) {
@@ -704,6 +746,7 @@ fn spawn_connection_actor(
 
                         if frame.kind == FrameKind::ExecuteResult {
                             guest_dispatchers.remove(&frame.worker_id);
+                            guest_dispatch_limits.remove(&frame.worker_id);
                             let reason = decode_payload::<ExecuteResult>(&frame.payload)
                                 .map(|result| termination_reason_name(result.reason))
                                 .unwrap_or("unknown");
@@ -720,6 +763,7 @@ fn spawn_connection_actor(
                                 .is_ok_and(|result| result.error.is_none())
                         {
                             guest_dispatchers.remove(&frame.worker_id);
+                            guest_dispatch_limits.remove(&frame.worker_id);
                             fail_pending_worker_calls(
                                 &mut pending,
                                 frame.worker_id,
@@ -1553,6 +1597,20 @@ fn timeout_milliseconds(timeout: Option<f64>) -> PyResult<Option<u64>> {
         return Err(PyValueError::new_err("timeout is too large"));
     }
     Ok(Some(milliseconds.max(1.0) as u64))
+}
+
+fn validate_guest_dispatch_limits(concurrency: u64, queue_capacity: u64) -> PyResult<()> {
+    if concurrency == 0 {
+        return Err(PyValueError::new_err(
+            "guest_dispatch_request_concurrency must be positive",
+        ));
+    }
+    if queue_capacity == 0 {
+        return Err(PyValueError::new_err(
+            "guest_dispatch_request_queue_capacity must be positive",
+        ));
+    }
+    Ok(())
 }
 
 #[pymodule]

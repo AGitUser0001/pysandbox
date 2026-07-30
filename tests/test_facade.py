@@ -26,12 +26,12 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       ValueError,
       "guest_dispatch_request_concurrency",
     ):
-      PythonRuntime(guest_dispatch_request_concurrency=0)
+      RuntimeLimits(guest_dispatch_request_concurrency=0)
     with self.assertRaisesRegex(
       ValueError,
       "guest_dispatch_request_queue_capacity",
     ):
-      PythonRuntime(guest_dispatch_request_queue_capacity=0)
+      RuntimeLimits(guest_dispatch_request_queue_capacity=0)
 
   async def test_execution_rpc_worker_and_output(self) -> None:
     runtime = PythonRuntime()
@@ -379,10 +379,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       await runtime.close()
 
   async def test_guest_dispatch_request_concurrency(self) -> None:
-    runtime = PythonRuntime(
-      host_dispatch_concurrency=8,
-      guest_dispatch_request_concurrency=2,
-    )
+    runtime = PythonRuntime(host_dispatch_concurrency=8)
     active = 0
     maximum_active = 0
     two_active = asyncio.Event()
@@ -405,6 +402,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       execution = asyncio.create_task(
         runtime.execute(
           "import asyncio\nawait asyncio.gather(*(locally_held() for _ in range(6)))",
+          limits=RuntimeLimits(guest_dispatch_request_concurrency=2),
         )
       )
       await asyncio.wait_for(two_active.wait(), timeout=5)
@@ -424,8 +422,6 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     runtime = PythonRuntime(
       host_dispatch_concurrency=8,
       host_dispatch_queue_capacity=32,
-      guest_dispatch_request_concurrency=1,
-      guest_dispatch_request_queue_capacity=1,
     )
     first_started = asyncio.Event()
     release = asyncio.Event()
@@ -453,6 +449,10 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
           "  return_exceptions=True,\n"
           ")\n"
           "print(*(str(result) for result in results), sep='\\n', flush=True)",
+          limits=RuntimeLimits(
+            guest_dispatch_request_concurrency=1,
+            guest_dispatch_request_queue_capacity=1,
+          ),
         )
       )
       await asyncio.wait_for(first_started.wait(), timeout=5)

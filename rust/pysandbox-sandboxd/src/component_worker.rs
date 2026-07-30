@@ -883,6 +883,7 @@ impl ComponentWorker {
     pub(crate) async fn load(
         runtime: &ComponentRuntime,
         python_root: &Path,
+        worker_id: u64,
         rpc: RpcBridge,
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
@@ -891,6 +892,7 @@ impl ComponentWorker {
         Self::load_with_python_permissions(
             runtime,
             python_root,
+            worker_id,
             rpc,
             control,
             control_receiver,
@@ -904,6 +906,7 @@ impl ComponentWorker {
     async fn load_with_python_permissions(
         runtime: &ComponentRuntime,
         python_root: &Path,
+        worker_id: u64,
         rpc: RpcBridge,
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
@@ -926,7 +929,13 @@ impl ComponentWorker {
             wasi.preopened_dir(python_root, "/python", python_dir_perms, python_file_perms)?;
         }
         let wasi = wasi.build();
-        let vfs = python_vfs(runtime, python_root, python_dir_perms, python_file_perms)?;
+        let vfs = python_vfs(
+            runtime,
+            python_root,
+            worker_id,
+            python_dir_perms,
+            python_file_perms,
+        )?;
         let mut store = Store::new(
             &engine,
             ComponentState {
@@ -1079,6 +1088,7 @@ async fn run_build_program(
     let mut worker = ComponentWorker::load_with_python_permissions(
         &runtime,
         python_root,
+        0,
         rpc,
         control,
         control_receiver,
@@ -1128,10 +1138,11 @@ fn collect_python_files(root: &Path, directory: &Path, files: &mut Vec<String>) 
 fn python_vfs(
     runtime: &ComponentRuntime,
     python_root: &Path,
+    worker_id: u64,
     dir_perms: DirPerms,
     file_perms: FilePerms,
 ) -> Result<HybridVfsCtx<RemoteVfs>> {
-    let mut vfs = HybridVfsCtx::new(runtime.vfs.clone());
+    let mut vfs = HybridVfsCtx::new(runtime.vfs.for_worker(worker_id));
     vfs.allow_blocking_current_thread(true);
     vfs.add_vfs_preopen("/", DirPerms::READ, FilePerms::READ);
     let mut python = RealDir::open_ambient(python_root, dir_perms, file_perms)?;
