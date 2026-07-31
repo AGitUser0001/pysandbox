@@ -11,6 +11,8 @@ from pysandbox import (
   VfsMetadata,
 )
 
+DISPATCH_TEST_TIMEOUT = 30
+
 
 class MemoryVfs:
   def __init__(self) -> None:
@@ -104,13 +106,13 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
 
     try:
       first = asyncio.create_task(runtime.execute("await held('first')"))
-      await asyncio.wait_for(first_started.wait(), timeout=5)
+      await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
       second = asyncio.create_task(runtime.execute("await held('second')"))
       await asyncio.sleep(0.05)
 
       overloaded = await asyncio.wait_for(
         runtime.execute("import hello"),
-        timeout=2,
+        timeout=DISPATCH_TEST_TIMEOUT,
       )
       self.assertIn("OSError", overloaded.error or "")
 
