@@ -455,17 +455,18 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let mut entries = Vec::new();
                 for entry in raw_entries {
                     let name = dir.dir.guest_name(&entry);
-                    let file_type = entry
-                        .file_type()
+                    let is_dir = entry
+                        .is_dir()
                         .map_err(|e| crate::VfsError::Io(format!("file_type: {}", e)))?;
-                    let type_ = if file_type.is_dir() {
+                    let is_symlink = entry
+                        .is_symlink()
+                        .map_err(|e| crate::VfsError::Io(format!("file_type: {}", e)))?;
+                    let type_ = if is_dir {
                         types::DescriptorType::Directory
-                    } else if file_type.is_symlink() {
+                    } else if is_symlink {
                         types::DescriptorType::SymbolicLink
-                    } else if file_type.is_file() {
-                        types::DescriptorType::RegularFile
                     } else {
-                        types::DescriptorType::Unknown
+                        types::DescriptorType::RegularFile
                     };
                     entries.push(types::DirectoryEntry { name, type_ });
                 }

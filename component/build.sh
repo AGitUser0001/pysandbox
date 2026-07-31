@@ -5,7 +5,6 @@ cd "$(dirname "$0")"
 uv run componentize-py \
   -d wit \
   -w python \
-  componentize guest \
-  -p . \
-  -p ../vendor/cbor2 \
+  componentize main \
+  -p src \
   -o pysandbox.wasm

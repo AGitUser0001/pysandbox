@@ -32,6 +32,21 @@ use crate::wasi_impl::VfsDescriptor;
 pub struct RestrictedDir {
     inner: Arc<cap_std::fs::Dir>,
     file_map: Option<HashMap<String, String>>,
+    overlays: Arc<HashMap<String, RestrictedOverlay>>,
+}
+
+#[derive(Clone)]
+enum RestrictedOverlay {
+    Directory(RestrictedDir),
+    File { parent: RestrictedDir, name: String },
+}
+
+/// An entry returned from a restricted real directory.
+pub enum RestrictedDirEntry {
+    /// An entry from the directory's physical backing filesystem.
+    Physical(cap_std::fs::DirEntry),
+    /// A readonly entry overlaid from another real filesystem location.
+    Overlay { name: String, is_dir: bool },
 }
 
 impl std::fmt::Debug for RestrictedDir {
@@ -48,6 +63,7 @@ impl RestrictedDir {
         Self {
             inner: Arc::new(dir),
             file_map: None,
+            overlays: Arc::new(HashMap::new()),
         }
     }
 
@@ -59,6 +75,7 @@ impl RestrictedDir {
         Self {
             inner: Arc::new(dir),
             file_map: Some(file_map),
+            overlays: Arc::new(HashMap::new()),
         }
     }
 
@@ -109,6 +126,17 @@ impl RestrictedDir {
         guest_path: &str,
         opts: &cap_std::fs::OpenOptions,
     ) -> std::io::Result<cap_std::fs::File> {
+        if let Some((overlay, relative)) = self.resolve_overlay(guest_path) {
+            return match overlay {
+                RestrictedOverlay::Directory(directory) if !relative.is_empty() => {
+                    directory.open_with(relative, opts)
+                }
+                RestrictedOverlay::File { parent, name } if relative.is_empty() => {
+                    parent.open_with(name, opts)
+                }
+                _ => Err(path_type_error(guest_path)),
+            };
+        }
         self.check_allowed(guest_path)?;
         self.inner.open_with(self.translate(guest_path), opts)
     }
@@ -116,22 +144,45 @@ impl RestrictedDir {
     /// Open a subdirectory. The returned `RestrictedDir` is unrestricted
     /// (subdirectories don't inherit single-file restrictions).
     pub fn open_dir(&self, guest_path: &str) -> std::io::Result<RestrictedDir> {
+        if let Some((overlay, relative)) = self.resolve_overlay(guest_path) {
+            return match overlay {
+                RestrictedOverlay::Directory(directory) if relative.is_empty() => {
+                    Ok(directory.clone())
+                }
+                RestrictedOverlay::Directory(directory) => directory.open_dir(relative),
+                RestrictedOverlay::File { .. } => Err(path_type_error(guest_path)),
+            };
+        }
         self.check_allowed(guest_path)?;
         let sub = self.inner.open_dir(self.translate(guest_path))?;
         Ok(RestrictedDir {
             inner: Arc::new(sub),
             file_map: None,
+            overlays: Arc::new(HashMap::new()),
         })
     }
 
     /// Create a subdirectory.
     pub fn create_dir(&self, guest_path: &str) -> std::io::Result<()> {
+        self.reject_overlay_mutation(guest_path)?;
         self.check_allowed(guest_path)?;
         self.inner.create_dir(self.translate(guest_path))
     }
 
     /// Get metadata for a child path.
     pub fn metadata(&self, guest_path: &str) -> std::io::Result<cap_std::fs::Metadata> {
+        if let Some((overlay, relative)) = self.resolve_overlay(guest_path) {
+            return match overlay {
+                RestrictedOverlay::Directory(directory) if relative.is_empty() => {
+                    directory.dir_metadata()
+                }
+                RestrictedOverlay::Directory(directory) => directory.metadata(relative),
+                RestrictedOverlay::File { parent, name } if relative.is_empty() => {
+                    parent.metadata(name)
+                }
+                RestrictedOverlay::File { .. } => Err(path_type_error(guest_path)),
+            };
+        }
         self.check_allowed(guest_path)?;
         self.inner.metadata(self.translate(guest_path))
     }
@@ -143,18 +194,31 @@ impl RestrictedDir {
 
     /// Read a symbolic link.
     pub fn read_link(&self, guest_path: &str) -> std::io::Result<std::path::PathBuf> {
+        if let Some((overlay, relative)) = self.resolve_overlay(guest_path) {
+            return match overlay {
+                RestrictedOverlay::Directory(directory) if !relative.is_empty() => {
+                    directory.read_link(relative)
+                }
+                RestrictedOverlay::File { parent, name } if relative.is_empty() => {
+                    parent.read_link(name)
+                }
+                _ => Err(path_type_error(guest_path)),
+            };
+        }
         self.check_allowed(guest_path)?;
         self.inner.read_link(self.translate(guest_path))
     }
 
     /// Remove a subdirectory.
     pub fn remove_dir(&self, guest_path: &str) -> std::io::Result<()> {
+        self.reject_overlay_mutation(guest_path)?;
         self.check_allowed(guest_path)?;
         self.inner.remove_dir(self.translate(guest_path))
     }
 
     /// Remove a file.
     pub fn remove_file(&self, guest_path: &str) -> std::io::Result<()> {
+        self.reject_overlay_mutation(guest_path)?;
         self.check_allowed(guest_path)?;
         self.inner.remove_file(self.translate(guest_path))
     }
@@ -166,6 +230,8 @@ impl RestrictedDir {
         dest: &RestrictedDir,
         new_guest: &str,
     ) -> std::io::Result<()> {
+        self.reject_overlay_mutation(old_guest)?;
+        dest.reject_overlay_mutation(new_guest)?;
         self.check_allowed(old_guest)?;
         dest.check_allowed(new_guest)?;
         self.inner.rename(
@@ -177,6 +243,7 @@ impl RestrictedDir {
 
     /// Create a symbolic link.
     pub fn symlink(&self, src_path: &str, dest_guest: &str) -> std::io::Result<()> {
+        self.reject_overlay_mutation(dest_guest)?;
         self.check_allowed(dest_guest)?;
         self.inner.symlink(src_path, self.translate(dest_guest))
     }
@@ -185,9 +252,13 @@ impl RestrictedDir {
     ///
     /// If restricted, only mapped files are returned with guest-visible names.
     /// If unrestricted, all entries are returned as-is.
-    pub fn entries(&self) -> std::io::Result<Vec<cap_std::fs::DirEntry>> {
-        match &self.file_map {
-            None => self.inner.entries()?.collect::<Result<Vec<_>, _>>(),
+    pub fn entries(&self) -> std::io::Result<Vec<RestrictedDirEntry>> {
+        let mut entries = match &self.file_map {
+            None => self
+                .inner
+                .entries()?
+                .map(|entry| entry.map(RestrictedDirEntry::Physical))
+                .collect::<Result<Vec<_>, _>>()?,
             Some(map) => {
                 // Build reverse map: host_name → guest_name
                 let reverse: HashMap<&str, &str> = map
@@ -199,20 +270,33 @@ impl RestrictedDir {
                     let entry = entry?;
                     let host_name = entry.file_name().to_string_lossy().into_owned();
                     if reverse.contains_key(host_name.as_str()) {
-                        result.push(entry);
+                        result.push(RestrictedDirEntry::Physical(entry));
                     }
                 }
-                Ok(result)
+                result
+            }
+        };
+        let mut names = entries
+            .iter()
+            .map(RestrictedDirEntry::name)
+            .collect::<std::collections::HashSet<_>>();
+        for (name, overlay) in self.overlays.iter() {
+            if names.insert(name.clone()) {
+                entries.push(RestrictedDirEntry::Overlay {
+                    name: name.clone(),
+                    is_dir: matches!(overlay, RestrictedOverlay::Directory(_)),
+                });
             }
         }
+        Ok(entries)
     }
 
     /// Get the guest-visible name for a directory entry.
     ///
     /// If restricted, translates the host filename back to the guest filename.
     /// If unrestricted, returns the entry's filename as-is.
-    pub fn guest_name(&self, entry: &cap_std::fs::DirEntry) -> String {
-        let host_name = entry.file_name().to_string_lossy().into_owned();
+    pub fn guest_name(&self, entry: &RestrictedDirEntry) -> String {
+        let host_name = entry.name();
         match &self.file_map {
             None => host_name,
             Some(map) => {
@@ -226,6 +310,73 @@ impl RestrictedDir {
             }
         }
     }
+
+    fn resolve_overlay<'a>(&'a self, path: &'a str) -> Option<(&'a RestrictedOverlay, &'a str)> {
+        let normalized = path.strip_prefix("./").unwrap_or(path);
+        let (name, relative) = normalized.split_once('/').unwrap_or((normalized, ""));
+        self.overlays.get(name).map(|overlay| (overlay, relative))
+    }
+
+    fn reject_overlay_mutation(&self, path: &str) -> std::io::Result<()> {
+        if self.resolve_overlay(path).is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "overlay is read-only",
+            ));
+        }
+        Ok(())
+    }
+
+    fn with_overlay(mut self, path: &str, overlay: RestrictedOverlay) -> std::io::Result<Self> {
+        let normalized = path.trim_matches('/');
+        let (name, relative) = normalized.split_once('/').unwrap_or((normalized, ""));
+        if relative.is_empty() {
+            Arc::make_mut(&mut self.overlays).insert(name.to_string(), overlay);
+            return Ok(self);
+        }
+        let child = match self.overlays.get(name) {
+            Some(RestrictedOverlay::Directory(directory)) => directory.clone(),
+            Some(RestrictedOverlay::File { .. }) => return Err(path_type_error(path)),
+            None => self.open_dir(name)?,
+        }
+        .with_overlay(relative, overlay)?;
+        Arc::make_mut(&mut self.overlays)
+            .insert(name.to_string(), RestrictedOverlay::Directory(child));
+        Ok(self)
+    }
+}
+
+impl RestrictedDirEntry {
+    /// Return the guest-visible entry name before file-map translation.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Physical(entry) => entry.file_name().to_string_lossy().into_owned(),
+            Self::Overlay { name, .. } => name.clone(),
+        }
+    }
+
+    /// Return whether this entry is a directory.
+    pub fn is_dir(&self) -> std::io::Result<bool> {
+        match self {
+            Self::Physical(entry) => entry.file_type().map(|file_type| file_type.is_dir()),
+            Self::Overlay { is_dir, .. } => Ok(*is_dir),
+        }
+    }
+
+    /// Return whether this entry is a symbolic link.
+    pub fn is_symlink(&self) -> std::io::Result<bool> {
+        match self {
+            Self::Physical(entry) => entry.file_type().map(|file_type| file_type.is_symlink()),
+            Self::Overlay { .. } => Ok(false),
+        }
+    }
+}
+
+fn path_type_error(path: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("path has incompatible overlay type: {path}"),
+    )
 }
 
 /// A real filesystem directory handle.
@@ -274,6 +425,44 @@ impl RealDir {
     ) -> std::io::Result<Self> {
         let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
         Ok(Self::new(dir, dir_perms, file_perms))
+    }
+
+    /// Overlay a readonly directory beneath this directory.
+    pub fn overlay_directory(
+        &mut self,
+        guest_path: &str,
+        host_path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<()> {
+        let directory = RestrictedDir::open_ambient(host_path)?;
+        self.dir = self
+            .dir
+            .clone()
+            .with_overlay(guest_path, RestrictedOverlay::Directory(directory))?;
+        Ok(())
+    }
+
+    /// Overlay a readonly file beneath this directory.
+    pub fn overlay_file(
+        &mut self,
+        guest_path: &str,
+        host_path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<()> {
+        let host_path = host_path.as_ref();
+        let parent = RestrictedDir::open_ambient(host_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "file has no parent")
+        })?)?;
+        let name = host_path
+            .file_name()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "file has no name")
+            })?
+            .to_string_lossy()
+            .into_owned();
+        self.dir = self
+            .dir
+            .clone()
+            .with_overlay(guest_path, RestrictedOverlay::File { parent, name })?;
+        Ok(())
     }
 }
 

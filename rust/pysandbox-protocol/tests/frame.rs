@@ -44,6 +44,7 @@ fn typed_payloads_round_trip_separately_from_the_frame() {
         program: "print('hello')".into(),
         limits: ExecutionLimits::default(),
         rpc_methods: vec!["read".into()],
+        package_paths: vec!["/cache/example".into()],
     };
 
     assert_eq!(

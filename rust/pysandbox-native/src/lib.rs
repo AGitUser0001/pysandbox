@@ -180,6 +180,7 @@ impl SandboxProcess {
         *,
         worker_id = 0,
         rpc_methods = Vec::new(),
+        package_paths = Vec::new(),
         max_memory_bytes = 128 * 1024 * 1024,
         max_output_bytes = 256 * 1024,
         max_guest_rpc_bytes = 10 * 1024 * 1024,
@@ -195,6 +196,7 @@ impl SandboxProcess {
         program: String,
         worker_id: u64,
         rpc_methods: Vec<String>,
+        package_paths: Vec<PathBuf>,
         max_memory_bytes: u64,
         max_output_bytes: u64,
         max_guest_rpc_bytes: u64,
@@ -218,6 +220,10 @@ impl SandboxProcess {
         let payload = encode_payload(&ExecuteRequest {
             program,
             rpc_methods,
+            package_paths: package_paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             limits: ExecutionLimits {
                 max_memory_bytes,
                 max_output_bytes,
@@ -256,6 +262,7 @@ impl SandboxProcess {
         *,
         worker_id = 0,
         rpc_methods = Vec::new(),
+        package_paths = Vec::new(),
         max_memory_bytes = 128 * 1024 * 1024,
         max_output_bytes = 256 * 1024,
         max_guest_rpc_bytes = 10 * 1024 * 1024,
@@ -271,6 +278,7 @@ impl SandboxProcess {
         program: String,
         worker_id: u64,
         rpc_methods: Vec<String>,
+        package_paths: Vec<PathBuf>,
         max_memory_bytes: u64,
         max_output_bytes: u64,
         max_guest_rpc_bytes: u64,
@@ -296,6 +304,10 @@ impl SandboxProcess {
             let payload = encode_payload(&ExecuteRequest {
                 program,
                 rpc_methods,
+                package_paths: package_paths
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
                 limits: ExecutionLimits {
                     max_memory_bytes,
                     max_output_bytes,

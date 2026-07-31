@@ -1,3 +1,13 @@
+from .packages import (
+  CachedPackage,
+  CachePolicy,
+  Package,
+  PackageCache,
+  PackageEnvironment,
+  PackageError,
+  PackageIndex,
+  PackageManager,
+)
 from .rpc import RpcContext, RpcHandler, RpcHost
 from .runtime import (
   AddFuel,
@@ -17,8 +27,16 @@ from .vfs import VfsDirectoryEntry, VfsMetadata, VirtualFileSystem
 
 __all__ = [
   "AddFuel",
+  "CachePolicy",
+  "CachedPackage",
   "Output",
   "OutputEvent",
+  "Package",
+  "PackageCache",
+  "PackageEnvironment",
+  "PackageError",
+  "PackageIndex",
+  "PackageManager",
   "PythonRuntime",
   "RpcContext",
   "RpcHandler",

@@ -189,6 +189,36 @@ to each worker. RPC and VFS requests share the worker's limits, preventing one
 guest from consuming the sandbox-wide host dispatch budget. Configure them on
 the execution's `RuntimeLimits`.
 
+## Packages
+
+Resolve pure-Python wheels into immutable, reusable package layers, then attach
+the resulting environment to an execution:
+
+```python
+from pysandbox import Package
+
+environment = await runtime.packages.resolve(
+  Package("requests==2.32.5", build=False),
+  cache="by_version",
+)
+result = await runtime.execute(
+  "import requests; print(requests.__version__)",
+  packages=environment,
+)
+```
+
+Dependencies are included by default. Set `include_dependencies=False` to
+resolve only the requested distribution. `build=False` rejects source
+distributions; enabling builds runs their build backend on the trusted host.
+Only compatible pure-Python wheels are accepted.
+
+`runtime.packages.cache` exposes `add()`, `resolve()`, `remove()`, and
+`packages()`. The default uses the platform cache directory returned by
+`platformdirs.user_cache_path("pysandbox")`. Pass
+`package_cache=PackageCache(path)` to `PythonRuntime` to choose another
+location. `cache="never"` creates temporary layers owned by the returned
+environment; call `environment.close()` when it is no longer in use.
+
 ## Internals
 
 - A PyO3 extension supervises a Rust sandbox subprocess without blocking the

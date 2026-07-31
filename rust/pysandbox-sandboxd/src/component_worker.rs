@@ -888,6 +888,7 @@ impl ComponentWorker {
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
         worker_call_receiver: mpsc::Receiver<WorkerCallMessage>,
+        package_paths: &[String],
     ) -> Result<Self> {
         Self::load_with_python_permissions(
             runtime,
@@ -897,6 +898,7 @@ impl ComponentWorker {
             control,
             control_receiver,
             worker_call_receiver,
+            package_paths,
             DirPerms::READ,
             FilePerms::READ,
         )
@@ -911,6 +913,7 @@ impl ComponentWorker {
         control: WorkerControl,
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
         worker_call_receiver: mpsc::Receiver<WorkerCallMessage>,
+        package_paths: &[String],
         python_dir_perms: DirPerms,
         python_file_perms: FilePerms,
     ) -> Result<Self> {
@@ -933,6 +936,7 @@ impl ComponentWorker {
             runtime,
             python_root,
             worker_id,
+            package_paths,
             python_dir_perms,
             python_file_perms,
         )?;
@@ -981,6 +985,10 @@ impl ComponentWorker {
         store.set_fuel(u64::MAX)?;
         let guest =
             Python::instantiate_async(&mut store, &runtime.component, &runtime.linker).await?;
+        let initialize = store
+            .run_concurrent(async |store| guest.call_initialize(store).await)
+            .await??;
+        initialize.map_err(anyhow::Error::msg)?;
 
         Ok(Self {
             store,
@@ -1093,6 +1101,7 @@ async fn run_build_program(
         control,
         control_receiver,
         worker_call_receiver,
+        &[],
         DirPerms::all(),
         FilePerms::all(),
     )
@@ -1139,6 +1148,7 @@ fn python_vfs(
     runtime: &ComponentRuntime,
     python_root: &Path,
     worker_id: u64,
+    package_paths: &[String],
     dir_perms: DirPerms,
     file_perms: FilePerms,
 ) -> Result<HybridVfsCtx<RemoteVfs>> {
@@ -1147,6 +1157,21 @@ fn python_vfs(
     vfs.add_vfs_preopen("/", DirPerms::READ, FilePerms::READ);
     let mut python = RealDir::open_ambient(python_root, dir_perms, file_perms)?;
     python.allow_blocking = true;
+    for package_path in package_paths {
+        let path = Path::new(package_path);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("package path is not UTF-8: {package_path}"))?;
+        let guest_path = format!("lib/python3.14/site-packages/{name}");
+        if path.is_dir() {
+            python.overlay_directory(&guest_path, path)?;
+        } else if path.is_file() {
+            python.overlay_file(&guest_path, path)?;
+        } else {
+            return Err(anyhow!("package path does not exist: {package_path}"));
+        }
+    }
     vfs.add_real_preopen("/python", python);
     Ok(vfs)
 }

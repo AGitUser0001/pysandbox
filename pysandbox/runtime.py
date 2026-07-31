@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Self
 
 from . import _core
+from .packages import PackageCache, PackageEnvironment, PackageManager
 from .rpc import RpcHost
 from .vfs import VirtualFileSystem
 
@@ -192,6 +193,7 @@ class PythonRuntime:
     vfs: VirtualFileSystem | None = None,
     cache_vfs: bool = False,
     cache_vfs_negative: bool = False,
+    package_cache: PackageCache | None = None,
   ) -> None:
     if max_ipc_frame_bytes <= 0:
       raise ValueError("max_ipc_frame_bytes must be positive")
@@ -208,6 +210,7 @@ class PythonRuntime:
     self.vfs = vfs
     self.cache_vfs = cache_vfs
     self.cache_vfs_negative = cache_vfs_negative
+    self.packages = PackageManager(cache=package_cache)
     self.rpc = RpcHost(self._register_handler)
     self._sandbox: _core.SandboxProcess | None = None
     self._start_lock: asyncio.Lock | None = None
@@ -226,6 +229,7 @@ class PythonRuntime:
     rpc_methods: Collection[str] | None = None,
     spin: bool = False,
     spin_concurrent: bool = True,
+    packages: PackageEnvironment | None = None,
   ) -> RuntimeResult:
     worker = self._run(
       program,
@@ -233,6 +237,7 @@ class PythonRuntime:
       rpc_methods=rpc_methods,
       spin=spin,
       spin_concurrent=spin_concurrent,
+      packages=packages,
     )
     return await worker.task
 
@@ -244,6 +249,7 @@ class PythonRuntime:
     rpc_methods: Collection[str] | None = None,
     spin: bool = True,
     spin_concurrent: bool = True,
+    packages: PackageEnvironment | None = None,
   ) -> "Worker":
     return self._run(
       program,
@@ -251,6 +257,7 @@ class PythonRuntime:
       rpc_methods=rpc_methods,
       spin=spin,
       spin_concurrent=spin_concurrent,
+      packages=packages,
     )
 
   async def close(self) -> None:
@@ -290,6 +297,7 @@ class PythonRuntime:
     rpc_methods: Collection[str] | None,
     spin: bool,
     spin_concurrent: bool,
+    packages: PackageEnvironment | None,
   ) -> "Worker":
     asyncio.get_running_loop()
     selected_rpc_methods = self._select_rpc_methods(rpc_methods)
@@ -302,6 +310,7 @@ class PythonRuntime:
         spin=spin,
         spin_concurrent=spin_concurrent,
       ),
+      packages=packages,
       limits=limits or RuntimeLimits(),
       rpc_methods=selected_rpc_methods,
     )
@@ -409,6 +418,7 @@ class Worker:
     program: str,
     limits: RuntimeLimits,
     rpc_methods: tuple[str, ...],
+    packages: PackageEnvironment | None,
   ) -> None:
     self.runtime = runtime
     self.worker_id = worker_id
@@ -416,6 +426,7 @@ class Worker:
     self._program = program
     self._limits = limits
     self._rpc_methods = rpc_methods
+    self._packages = packages
     self._execution: asyncio.Future[_core.Execution] = (
       asyncio.get_running_loop().create_future()
     )
@@ -496,6 +507,11 @@ class Worker:
         self._program,
         worker_id=self.worker_id,
         rpc_methods=list(self._rpc_methods),
+        package_paths=(
+          [str(path) for path in self._packages.paths]
+          if self._packages is not None
+          else []
+        ),
         max_memory_bytes=self._limits.max_memory_bytes,
         max_output_bytes=self._limits.max_output_bytes,
         max_guest_rpc_bytes=self._limits.max_guest_rpc_bytes,

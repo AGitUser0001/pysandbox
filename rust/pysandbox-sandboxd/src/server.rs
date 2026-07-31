@@ -126,6 +126,7 @@ async fn serve_connection(
                         next_guest_call_id.clone(),
                         pending_guest_calls.clone(),
                         worker_queue_capacity,
+                        request.package_paths.clone(),
                     )
                 });
                 let command = WorkerCommand::Execute {
@@ -320,6 +321,7 @@ fn spawn_worker(
     next_guest_call_id: Arc<AtomicU64>,
     pending_guest_calls: PendingGuestCalls,
     worker_queue_capacity: usize,
+    package_paths: Vec<String>,
 ) -> WorkerHandle {
     let (commands, mut command_receiver) = mpsc::channel(worker_queue_capacity);
     let (control, control_receiver, worker_call_receiver) =
@@ -340,6 +342,7 @@ fn spawn_worker(
             actor_control,
             control_receiver,
             worker_call_receiver,
+            &package_paths,
         )
         .await
         {

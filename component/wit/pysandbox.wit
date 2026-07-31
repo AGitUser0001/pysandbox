@@ -23,5 +23,6 @@ interface host {
 
 world python {
   import host;
+  export initialize: func() -> result<_, string>;
   export run: async func() -> result<_, string>;
 }

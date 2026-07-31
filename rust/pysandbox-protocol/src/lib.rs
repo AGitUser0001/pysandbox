@@ -62,6 +62,7 @@ pub struct ExecuteRequest {
     pub program: String,
     pub limits: ExecutionLimits,
     pub rpc_methods: Vec<String>,
+    pub package_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
