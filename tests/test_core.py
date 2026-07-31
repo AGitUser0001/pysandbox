@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pysandbox import _core
 from pysandbox.rpc import RpcContext
-from pysandbox.runtime import TerminationReason
+from pysandbox.runtime import TerminationReason, component_paths
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
@@ -18,7 +18,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
     self.assertIsNone(await _core.sleep(0))
 
   async def test_sandbox_process_health_and_shutdown(self) -> None:
-    project_root = Path(__file__).parents[1]
+    component, python_root = component_paths()
 
     with tempfile.TemporaryDirectory() as directory:
       if sys.platform in {"linux", "win32"}:
@@ -29,8 +29,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
       sandbox = await _core.start_sandbox(
         sys.executable,
         socket_name,
-        project_root / "pysandbox" / "_runtime" / "pysandbox.wasm",
-        project_root / "vendor" / "cpython" / "Lib",
+        component,
+        python_root,
         executable_arguments=["-m", "pysandbox._sandboxd"],
         worker_queue_capacity=1,
       )

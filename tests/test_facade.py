@@ -548,7 +548,10 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     )
     try:
       first = asyncio.create_task(worker.call(("held_call",), None))
-      await asyncio.wait_for(host_call_started.wait(), timeout=5)
+      await asyncio.wait_for(
+        host_call_started.wait(),
+        timeout=DISPATCH_TEST_TIMEOUT,
+      )
       second = asyncio.create_task(worker.call(("held_call",), None))
       await asyncio.sleep(0.05)
       with self.assertRaisesRegex(RuntimeError, "worker call queue is full"):
