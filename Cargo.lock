@@ -1325,6 +1325,7 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "pysandbox-protocol",
+ "pysandbox-runtime-build",
  "pysandbox-sandboxd",
  "tokio",
 ]
@@ -1337,6 +1338,14 @@ dependencies = [
  "serde",
  "serde_bytes",
  "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "pysandbox-runtime-build"
+version = "0.1.0"
+dependencies = [
+ "pysandbox-sandboxd",
  "tokio",
 ]
 

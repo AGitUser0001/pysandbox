@@ -11,13 +11,18 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "*"
   pull_request:
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 jobs:
   checks:
@@ -49,7 +54,35 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace
 
+  runtime:
+    name: Component runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install componentize-py
+        run: python -m pip install componentize-py
+      - name: Generate component runtime
+        run: >-
+          cargo run
+          --release
+          --package pysandbox-runtime-build
+          --
+          target/pysandbox-runtime
+      - name: Upload component runtime
+        uses: actions/upload-artifact@v6
+        with:
+          name: component-runtime
+          path: target/pysandbox-runtime
+
   linux:
+    needs: runtime
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -64,6 +97,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@v7
+        with:
+          name: component-runtime
+          path: .pysandbox-runtime
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -72,10 +109,11 @@ jobs:
             --release
             --out dist
             --find-interpreter
+            --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: true
           manylinux: "2_28"
-          before-script-linux: uv tool install componentize-py
+          docker-options: -e PYSANDBOX_PREBUILT_RUNTIME=.pysandbox-runtime
       - name: Install wheel
         if: ${{ matrix.target == 'x86_64' }}
         run: |
@@ -92,7 +130,14 @@ jobs:
           path: dist
 
   windows:
+    needs: runtime
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x64
+          - aarch64
     steps:
       - uses: actions/checkout@v6
         with:
@@ -101,32 +146,40 @@ jobs:
         with:
           python-version: "3.13"
           architecture: x64
-      - name: Install componentize-py
-        run: python -m pip install componentize-py
+      - uses: actions/download-artifact@v7
+        with:
+          name: component-runtime
+          path: .pysandbox-runtime
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
         with:
-          target: x64
+          target: ${{ matrix.target }}
           args: >-
             --release
             --out dist
             --find-interpreter
+            --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: true
       - name: Install wheel
+        if: ${{ matrix.target == 'x64' }}
         run: |
           python -m pip install cbor2
           python -m pip install --no-index --no-deps --find-links dist pysandbox
       - name: Test installed wheel
+        if: ${{ matrix.target == 'x64' }}
         working-directory: tests
         run: python -m unittest discover -v
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-windows-x64
+          name: wheels-windows-${{ matrix.target }}
           path: dist
 
   macos:
+    needs: runtime
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
@@ -143,18 +196,23 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install componentize-py
-        run: python -m pip install componentize-py
+      - uses: actions/download-artifact@v7
+        with:
+          name: component-runtime
+          path: .pysandbox-runtime
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
         with:
           target: ${{ matrix.platform.target }}
           args: >-
             --release
             --out dist
             --find-interpreter
+            --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: true
       - name: Install wheel
         run: |
           python -m pip install cbor2
@@ -190,7 +248,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'release' }}
     needs:
       - linux
       - windows
@@ -203,13 +261,23 @@ jobs:
       attestations: write
     steps:
       - uses: actions/download-artifact@v7
+      - name: Package component runtime
+        env:
+          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ github.event.release.tag_name }}.tar.gz
+        run: tar -C component-runtime -czf "$RUNTIME_ARCHIVE" .
       - name: Generate artifact attestation
         uses: actions/attest@v4
         with:
-          subject-path: "wheels-*/*"
+          subject-path: |
+            wheels-*/*
+            pysandbox-component-runtime-*.tar.gz
+      - name: Attach artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ github.event.release.tag_name }}.tar.gz
+        run: gh release upload "$RELEASE_TAG" wheels-*/* "$RUNTIME_ARCHIVE" --clobber
       - name: Install uv
-        if: ${{ startsWith(github.ref, 'refs/tags/') && vars.PYPI_PUBLISH_ENABLED == 'true' }}
         uses: astral-sh/setup-uv@v7
       - name: Publish to PyPI
-        if: ${{ startsWith(github.ref, 'refs/tags/') && vars.PYPI_PUBLISH_ENABLED == 'true' }}
         run: uv publish --trusted-publishing always "wheels-*/*"

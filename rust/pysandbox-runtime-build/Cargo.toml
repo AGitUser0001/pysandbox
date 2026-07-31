@@ -1,0 +1,19 @@
+[package]
+name = "pysandbox-runtime-build"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+test = false
+doctest = false
+
+[[bin]]
+name = "pysandbox-runtime-build"
+test = false
+
+[dependencies]
+pysandbox-sandboxd = { path = "../pysandbox-sandboxd" }
+tokio.workspace = true

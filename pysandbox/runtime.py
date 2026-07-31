@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import itertools
 import keyword
 import sys
@@ -116,9 +117,9 @@ class Output(UserList[OutputEvent]):
   def formatted(
     self,
     *,
-    stdout: tuple[bytes | None, bytes | None] = (None, None),
-    stderr: tuple[bytes | None, bytes | None] = (None, None),
-  ) -> bytes:
+    stdout: tuple[builtins.bytes | None, builtins.bytes | None] = (None, None),
+    stderr: tuple[builtins.bytes | None, builtins.bytes | None] = (None, None),
+  ) -> builtins.bytes:
     affixes = {"stdout": stdout, "stderr": stderr}
     data = bytearray()
     current_source: str | None = None
@@ -144,8 +145,8 @@ class Output(UserList[OutputEvent]):
   def formatted_text(
     self,
     *,
-    stdout: tuple[bytes | None, bytes | None] = (None, None),
-    stderr: tuple[bytes | None, bytes | None] = (None, None),
+    stdout: tuple[builtins.bytes | None, builtins.bytes | None] = (None, None),
+    stderr: tuple[builtins.bytes | None, builtins.bytes | None] = (None, None),
   ) -> str:
     return self.formatted(stdout=stdout, stderr=stderr).decode(
       "utf-8",

@@ -6,9 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["generate-runtime"]
+generate-runtime = ["dep:pysandbox-runtime-build"]
+
 [lib]
 name = "pysandbox_native"
 crate-type = ["cdylib"]
+test = false
+doctest = false
 
 [dependencies]
 interprocess.workspace = true
@@ -19,5 +25,4 @@ pysandbox-sandboxd = { path = "../pysandbox-sandboxd" }
 tokio.workspace = true
 
 [build-dependencies]
-pysandbox-sandboxd = { path = "../pysandbox-sandboxd" }
-tokio.workspace = true
+pysandbox-runtime-build = { path = "../pysandbox-runtime-build", optional = true }
