@@ -22,7 +22,8 @@ build-backend = "maturin"
 
 [dependency-groups]
 dev = [
-    "componentize-py",
+  "componentize-py",
+  "ruff",
 ]
 
 [tool.maturin]
