@@ -95,7 +95,7 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     first_started = asyncio.Event()
     release = asyncio.Event()
     first: asyncio.Task[RuntimeResult] | None = None
-    second: asyncio.Task[RuntimeResult] | None = None
+    fillers: list[asyncio.Task[RuntimeResult]] = []
 
     @runtime.rpc.expose
     async def held(context: RpcContext, /, name: str) -> str:
@@ -107,17 +107,31 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     try:
       first = asyncio.create_task(runtime.execute("await held('first')"))
       await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
-      second = asyncio.create_task(runtime.execute("await held('second')"))
-      await asyncio.sleep(0.05)
+      fillers = [
+        asyncio.create_task(runtime.execute("await held('filler')")) for _ in range(3)
+      ]
+      completed, _ = await asyncio.wait_for(
+        asyncio.wait(fillers, return_when=asyncio.FIRST_COMPLETED),
+        timeout=DISPATCH_TEST_TIMEOUT,
+      )
+      completed_results = await asyncio.gather(*completed)
+      self.assertTrue(
+        any(
+          "host dispatch queue is full" in (result.error or "")
+          for result in completed_results
+        ),
+        completed_results,
+      )
 
       overloaded = await asyncio.wait_for(
         runtime.execute("import hello"),
         timeout=DISPATCH_TEST_TIMEOUT,
       )
-      self.assertIn("OSError", overloaded.error or "")
+      self.assertIsNotNone(overloaded.error)
+      self.assertEqual(vfs.calls, [])
 
       release.set()
-      await asyncio.gather(first, second)
+      await asyncio.gather(first, *fillers)
       recovered = await runtime.execute(
         "import hello\nprint(hello.value, flush=True)",
       )
@@ -125,7 +139,8 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
       self.assertEqual(recovered.stdout, b"42\n")
     finally:
       release.set()
-      pending = [task for task in (first, second) if task is not None]
+      pending = [first] if first is not None else []
+      pending.extend(fillers)
       if pending:
         await asyncio.gather(*pending, return_exceptions=True)
       await runtime.close()
