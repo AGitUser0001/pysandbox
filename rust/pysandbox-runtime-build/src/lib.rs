@@ -4,7 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn generate(project_root: &Path, output_root: &Path) {
-    fs::create_dir_all(output_root).expect("failed to create runtime artifact directory");
+    let output_root = if output_root.is_absolute() {
+        output_root.to_owned()
+    } else {
+        project_root.join(output_root)
+    };
+    fs::create_dir_all(&output_root).expect("failed to create runtime artifact directory");
 
     let component_root = project_root.join("component");
     let component_output = output_root.join("pysandbox.wasm");
