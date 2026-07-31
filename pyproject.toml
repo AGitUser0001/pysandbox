@@ -35,6 +35,10 @@ include = [
     { path = "vendor/eryx-vfs/**/*", format = "sdist" },
 ]
 
+[tool.maturin.generate-ci.github]
+trusted-publishing = true
+publishing-environment = "release"
+
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
