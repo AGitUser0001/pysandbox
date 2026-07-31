@@ -13,7 +13,7 @@ fn main() {
 
     watch_tree(&component_root);
     watch_tree(&project_root.join("vendor/cbor2/cbor2"));
-    watch_tree(&project_root.join("vendor/cpython/Lib"));
+    watch_python_stdlib(&project_root.join("vendor/cpython/Lib"));
     println!(
         "cargo:rerun-if-changed={}",
         project_root.join("vendor/cpython/LICENSE").display()
@@ -89,6 +89,23 @@ fn watch_tree(root: &Path) {
     };
     for entry in entries {
         let path = entry.expect("failed to read build input").path();
+        if path.is_dir() {
+            watch_tree(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
+
+fn watch_python_stdlib(root: &Path) {
+    println!("cargo:rerun-if-changed={}", root.display());
+    for entry in fs::read_dir(root).expect("failed to read CPython standard library") {
+        let path = entry
+            .expect("failed to read CPython standard library entry")
+            .path();
+        if path.file_name().is_some_and(|name| name == "test") {
+            continue;
+        }
         if path.is_dir() {
             watch_tree(&path);
         } else {
