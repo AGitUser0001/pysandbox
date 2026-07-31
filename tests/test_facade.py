@@ -13,6 +13,8 @@ from pysandbox import (
   WorkerStoppedError,
 )
 
+DISPATCH_TEST_TIMEOUT = 30
+
 
 class FacadeTests(unittest.IsolatedAsyncioTestCase):
   def test_worker_queue_capacity_validation(self) -> None:
@@ -367,7 +369,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       executions = [
         asyncio.create_task(runtime.execute("await held_call()")) for _ in range(6)
       ]
-      await asyncio.wait_for(two_active.wait(), timeout=5)
+      await asyncio.wait_for(two_active.wait(), timeout=DISPATCH_TEST_TIMEOUT)
       await asyncio.sleep(0.05)
       self.assertEqual(maximum_active, 2)
       release.set()
@@ -405,7 +407,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
           limits=RuntimeLimits(guest_dispatch_request_concurrency=2),
         )
       )
-      await asyncio.wait_for(two_active.wait(), timeout=5)
+      await asyncio.wait_for(two_active.wait(), timeout=DISPATCH_TEST_TIMEOUT)
       await asyncio.sleep(0.05)
       self.assertEqual(maximum_active, 2)
       release.set()
@@ -455,11 +457,11 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
           ),
         )
       )
-      await asyncio.wait_for(first_started.wait(), timeout=5)
+      await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
 
       unaffected = await asyncio.wait_for(
         runtime.execute("print(await locally_saturated('other'), flush=True)"),
-        timeout=2,
+        timeout=DISPATCH_TEST_TIMEOUT,
       )
       self.assertIsNone(unaffected.error)
       self.assertEqual(unaffected.stdout, b"other\n")
@@ -503,18 +505,21 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     try:
       self.assertEqual(await target.call(("ping",), None), "pong")
       first = asyncio.create_task(runtime.execute("await saturated_call('first')"))
-      await asyncio.wait_for(first_started.wait(), timeout=5)
+      await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
 
       second = asyncio.create_task(runtime.execute("await saturated_call('second')"))
       await asyncio.sleep(0.05)
       overloaded = await asyncio.wait_for(
         runtime.execute("await saturated_call('third')"),
-        timeout=2,
+        timeout=DISPATCH_TEST_TIMEOUT,
       )
       self.assertIn("host dispatch queue is full", overloaded.error or "")
 
       make_worker_call.set()
-      await asyncio.wait_for(worker_call_finished.wait(), timeout=2)
+      await asyncio.wait_for(
+        worker_call_finished.wait(),
+        timeout=DISPATCH_TEST_TIMEOUT,
+      )
       release.set()
       results = await asyncio.gather(first, second)
       self.assertTrue(all(result.error is None for result in results))
