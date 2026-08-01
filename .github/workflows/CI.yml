@@ -111,7 +111,13 @@ jobs:
           args: >-
             --release
             --out dist
-            --find-interpreter
+            --interpreter
+            /opt/python/cp312-cp312/bin/python
+            /opt/python/cp313-cp313/bin/python
+            /opt/python/cp314-cp314/bin/python
+            /opt/python/cp314-cp314t/bin/python
+            /opt/python/cp315-cp315/bin/python
+            /opt/python/cp315-cp315t/bin/python
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
           sccache: true
@@ -119,11 +125,31 @@ jobs:
           docker-options: -e PYSANDBOX_PREBUILT_RUNTIME=.pysandbox-runtime
       - name: Install wheel
         if: ${{ matrix.target == 'x86_64' }}
-        run: python -m pip install --find-links dist pysandbox
+        run: python -m pip install --pre --find-links dist pysandbox
       - name: Test installed wheel
         if: ${{ matrix.target == 'x86_64' }}
         working-directory: tests
         run: python -m unittest discover -v
+      - name: Set up free-threaded Python
+        if: ${{ matrix.target == 'x86_64' }}
+        id: python314t
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+      - name: Install free-threaded wheel
+        if: ${{ matrix.target == 'x86_64' }}
+        run: >-
+          '${{ steps.python314t.outputs.python-path }}'
+          -m pip install --pre --find-links dist pysandbox
+      - name: Test free-threaded wheel
+        if: ${{ matrix.target == 'x86_64' }}
+        working-directory: tests
+        run: >-
+          '${{ steps.python314t.outputs.python-path }}'
+          -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
+          &&
+          '${{ steps.python314t.outputs.python-path }}'
+          -m unittest discover -v
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -143,10 +169,38 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - uses: actions/setup-python@v6
+      - id: python312
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - id: python313
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           architecture: x64
+      - id: python314
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: x64
+      - id: python314t
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+          architecture: x64
+      - id: python315
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.15"
+          architecture: x64
+          allow-prereleases: true
+      - id: python315t
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.15t"
+          architecture: x64
+          allow-prereleases: true
       - uses: actions/download-artifact@v7
         with:
           name: component-runtime
@@ -160,17 +214,38 @@ jobs:
           args: >-
             --release
             --out dist
-            --find-interpreter
+            --interpreter
+            ${{ steps.python312.outputs.python-path }}
+            ${{ steps.python313.outputs.python-path }}
+            ${{ steps.python314.outputs.python-path }}
+            ${{ steps.python314t.outputs.python-path }}
+            ${{ steps.python315.outputs.python-path }}
+            ${{ steps.python315t.outputs.python-path }}
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
           sccache: true
       - name: Install wheel
         if: ${{ matrix.target == 'x64' }}
-        run: python -m pip install --find-links dist pysandbox
+        run: >-
+          & '${{ steps.python312.outputs.python-path }}'
+          -m pip install --pre --find-links dist pysandbox
       - name: Test installed wheel
         if: ${{ matrix.target == 'x64' }}
         working-directory: tests
-        run: python -m unittest discover -v
+        run: >-
+          & '${{ steps.python312.outputs.python-path }}'
+          -m unittest discover -v
+      - name: Install free-threaded wheel
+        if: ${{ matrix.target == 'x64' }}
+        run: >-
+          & '${{ steps.python314t.outputs.python-path }}'
+          -m pip install --pre --find-links dist pysandbox
+      - name: Test free-threaded wheel
+        if: ${{ matrix.target == 'x64' }}
+        working-directory: tests
+        run: |
+          & '${{ steps.python314t.outputs.python-path }}' -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
+          & '${{ steps.python314t.outputs.python-path }}' -m unittest discover -v
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -192,9 +267,32 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - uses: actions/setup-python@v6
+      - id: python312
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - id: python313
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - id: python314
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - id: python314t
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+      - id: python315
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+      - id: python315t
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.15t"
+          allow-prereleases: true
       - uses: actions/download-artifact@v7
         with:
           name: component-runtime
@@ -208,15 +306,37 @@ jobs:
           args: >-
             --release
             --out dist
-            --find-interpreter
+            --interpreter
+            ${{ steps.python312.outputs.python-path }}
+            ${{ steps.python313.outputs.python-path }}
+            ${{ steps.python314.outputs.python-path }}
+            ${{ steps.python314t.outputs.python-path }}
+            ${{ steps.python315.outputs.python-path }}
+            ${{ steps.python315t.outputs.python-path }}
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
           sccache: true
       - name: Install wheel
-        run: python -m pip install --find-links dist pysandbox
+        run: >-
+          '${{ steps.python312.outputs.python-path }}'
+          -m pip install --pre --find-links dist pysandbox
       - name: Test installed wheel
         working-directory: tests
-        run: python -m unittest discover -v
+        run: >-
+          '${{ steps.python312.outputs.python-path }}'
+          -m unittest discover -v
+      - name: Install free-threaded wheel
+        run: >-
+          '${{ steps.python314t.outputs.python-path }}'
+          -m pip install --pre --find-links dist pysandbox
+      - name: Test free-threaded wheel
+        working-directory: tests
+        run: >-
+          '${{ steps.python314t.outputs.python-path }}'
+          -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
+          &&
+          '${{ steps.python314t.outputs.python-path }}'
+          -m unittest discover -v
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:

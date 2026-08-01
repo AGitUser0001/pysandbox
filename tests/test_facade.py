@@ -1,6 +1,9 @@
 import asyncio
+import sys
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from pysandbox import (
   AddFuel,
@@ -16,9 +19,53 @@ from pysandbox import (
 )
 
 DISPATCH_TEST_TIMEOUT = 30
+FREE_THREADED = hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
 
 
 class FacadeTests(unittest.IsolatedAsyncioTestCase):
+  @unittest.skipUnless(FREE_THREADED, "requires free-threaded CPython")
+  async def test_shared_runtime_across_python_threads(self) -> None:
+    runtime = PythonRuntime()
+    await runtime.reopen()
+    thread_count = 4
+    executions_per_thread = 4
+    barrier = Barrier(thread_count)
+
+    def execute_from_thread(thread_index: int) -> list[int]:
+      async def execute_all() -> list[int]:
+        barrier.wait()
+        results = await asyncio.gather(
+          *(
+            runtime.execute(f"print({thread_index * 100 + index}, flush=True)")
+            for index in range(executions_per_thread)
+          )
+        )
+        self.assertTrue(
+          all(result.reason is TerminationReason.COMPLETED for result in results)
+        )
+        return [int(result.stdout) for result in results]
+
+      return asyncio.run(execute_all())
+
+    try:
+      with ThreadPoolExecutor(max_workers=thread_count) as executor:
+        futures = [
+          executor.submit(execute_from_thread, thread_index)
+          for thread_index in range(thread_count)
+        ]
+        values = [value for future in futures for value in future.result()]
+
+      self.assertCountEqual(
+        values,
+        [
+          thread_index * 100 + index
+          for thread_index in range(thread_count)
+          for index in range(executions_per_thread)
+        ],
+      )
+    finally:
+      await runtime.close()
+
   def test_worker_queue_capacity_validation(self) -> None:
     with self.assertRaisesRegex(ValueError, "worker_queue_capacity"):
       PythonRuntime(worker_queue_capacity=0)
