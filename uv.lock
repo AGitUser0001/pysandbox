@@ -115,7 +115,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pysandbox"
+name = "pysandbox-wasi"
 version = "1.4.0"
 source = { editable = "." }
 dependencies = [

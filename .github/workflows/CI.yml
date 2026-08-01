@@ -126,7 +126,7 @@ jobs:
           manylinux: "2_28"
           docker-options: -e PYSANDBOX_PREBUILT_RUNTIME=.pysandbox-runtime
       - name: Install wheel
-        run: python -m pip install --pre --find-links dist pysandbox
+        run: python -m pip install --pre --find-links dist pysandbox-wasi
       - name: Test installed wheel
         working-directory: tests
         run: python -m unittest discover -v
@@ -138,7 +138,7 @@ jobs:
       - name: Install free-threaded wheel
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
-          -m pip install --pre --find-links dist pysandbox
+          -m pip install --pre --find-links dist pysandbox-wasi
       - name: Test free-threaded wheel
         working-directory: tests
         run: >-
@@ -228,7 +228,7 @@ jobs:
       - name: Install wheel
         run: >-
           & '${{ steps.python312.outputs.python-path }}'
-          -m pip install --pre --find-links dist pysandbox
+          -m pip install --pre --find-links dist pysandbox-wasi
       - name: Test installed wheel
         working-directory: tests
         run: >-
@@ -237,7 +237,7 @@ jobs:
       - name: Install free-threaded wheel
         run: >-
           & '${{ steps.python314t.outputs.python-path }}'
-          -m pip install --pre --find-links dist pysandbox
+          -m pip install --pre --find-links dist pysandbox-wasi
       - name: Test free-threaded wheel
         working-directory: tests
         run: |
@@ -316,7 +316,7 @@ jobs:
       - name: Install wheel
         run: >-
           '${{ steps.python312.outputs.python-path }}'
-          -m pip install --pre --find-links dist pysandbox
+          -m pip install --pre --find-links dist pysandbox-wasi
       - name: Test installed wheel
         working-directory: tests
         run: >-
@@ -325,7 +325,7 @@ jobs:
       - name: Install free-threaded wheel
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
-          -m pip install --pre --find-links dist pysandbox
+          -m pip install --pre --find-links dist pysandbox-wasi
       - name: Test free-threaded wheel
         working-directory: tests
         run: >-
