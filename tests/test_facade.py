@@ -676,12 +676,12 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
     runtime = PythonRuntime()
     worker = runtime.run("import time\ntime.sleep(10)", spin=False)
     try:
-      started = time.monotonic()
       await worker.set_limits(timeout=0.1)
+      started = time.monotonic()
       result = await asyncio.wait_for(worker.task, timeout=5)
 
       self.assertEqual(result.reason, TerminationReason.TIMEOUT)
-      self.assertLess(time.monotonic() - started, 5)
+      self.assertLess(time.monotonic() - started, 2)
     finally:
       await worker.close()
       await runtime.close()
