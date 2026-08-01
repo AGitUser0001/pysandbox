@@ -19,8 +19,7 @@ from pysandbox import (
 )
 
 DISPATCH_TEST_TIMEOUT = 30
-FREE_THREADED = hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
-
+FREE_THREADED: bool = not getattr(sys, "_is_gil_enabled", lambda: True)()
 
 class FacadeTests(unittest.IsolatedAsyncioTestCase):
   @unittest.skipUnless(FREE_THREADED, "requires free-threaded CPython")

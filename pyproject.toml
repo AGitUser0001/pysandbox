@@ -50,6 +50,7 @@ publishing-environment = "release"
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
+pythonVersion = "3.12"
 exclude = [
     ".venv",
     "component",
