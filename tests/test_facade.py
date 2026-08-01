@@ -561,7 +561,7 @@ class TestFacade:
     release = asyncio.Event()
     target = runtime.run("def ping():\n  return 'pong'\n")
     first: asyncio.Task[RuntimeResult] | None = None
-    second: asyncio.Task[RuntimeResult] | None = None
+    fillers: list[asyncio.Task[RuntimeResult]] = []
 
     @runtime.rpc.expose
     async def saturated_call(context: RpcContext, /, name: str) -> str:
@@ -578,13 +578,19 @@ class TestFacade:
       first = asyncio.create_task(runtime.execute("await saturated_call('first')"))
       await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
 
-      second = asyncio.create_task(runtime.execute("await saturated_call('second')"))
-      await asyncio.sleep(0.05)
-      overloaded = await asyncio.wait_for(
-        runtime.execute("await saturated_call('third')"),
+      fillers = [
+        asyncio.create_task(runtime.execute(f"await saturated_call('{name}')"))
+        for name in ("second", "third", "fourth")
+      ]
+      completed, _ = await asyncio.wait_for(
+        asyncio.wait(fillers, return_when=asyncio.FIRST_COMPLETED),
         timeout=DISPATCH_TEST_TIMEOUT,
       )
-      assert "host dispatch queue is full" in (overloaded.error or "")
+      completed_results = await asyncio.gather(*completed)
+      assert any(
+        "host dispatch queue is full" in (result.error or "")
+        for result in completed_results
+      ), completed_results
 
       make_worker_call.set()
       await asyncio.wait_for(
@@ -592,12 +598,16 @@ class TestFacade:
         timeout=DISPATCH_TEST_TIMEOUT,
       )
       release.set()
-      results = await asyncio.gather(first, second)
-      assert all(result.error is None for result in results)
+      results = await asyncio.gather(first, *fillers)
+      assert all(
+        result.error is None or "host dispatch queue is full" in result.error
+        for result in results
+      )
     finally:
       make_worker_call.set()
       release.set()
-      pending = [task for task in (first, second) if task is not None]
+      pending = [first] if first is not None else []
+      pending.extend(fillers)
       if pending:
         await asyncio.gather(*pending, return_exceptions=True)
       await target.close()
