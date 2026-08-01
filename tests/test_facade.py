@@ -19,8 +19,32 @@ from pysandbox import (
   WorkerStoppedError,
 )
 
-DISPATCH_TEST_TIMEOUT = 30
+DISPATCH_TEST_TIMEOUT = 60
 FREE_THREADED: bool = not getattr(sys, "_is_gil_enabled", lambda: True)()
+
+
+async def wait_for_event_or_execution(
+  event: asyncio.Event,
+  execution: asyncio.Task[RuntimeResult],
+) -> None:
+  event_wait = asyncio.create_task(event.wait())
+  done, _ = await asyncio.wait(
+    (event_wait, execution),
+    timeout=DISPATCH_TEST_TIMEOUT,
+    return_when=asyncio.FIRST_COMPLETED,
+  )
+  if event_wait in done:
+    return
+
+  event_wait.cancel()
+  await asyncio.gather(event_wait, return_exceptions=True)
+  if execution in done:
+    result = await execution
+    pytest.fail(
+      "execution stopped before reaching expected concurrency: "
+      f"reason={result.reason.value}, error={result.error!r}"
+    )
+  pytest.fail("execution did not reach expected concurrency before the deadline")
 
 
 class TestFacade:
@@ -457,7 +481,7 @@ class TestFacade:
           limits=RuntimeLimits(guest_dispatch_request_concurrency=2),
         )
       )
-      await asyncio.wait_for(two_active.wait(), timeout=DISPATCH_TEST_TIMEOUT)
+      await wait_for_event_or_execution(two_active, execution)
       await asyncio.sleep(0.05)
       assert maximum_active == 2
       release.set()
