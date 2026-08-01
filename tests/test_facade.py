@@ -53,7 +53,10 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
           executor.submit(execute_from_thread, thread_index)
           for thread_index in range(thread_count)
         ]
-        values = [value for future in futures for value in future.result()]
+        thread_values = await asyncio.gather(
+          *(asyncio.wrap_future(future) for future in futures)
+        )
+        values = [value for result in thread_values for value in result]
 
       self.assertCountEqual(
         values,

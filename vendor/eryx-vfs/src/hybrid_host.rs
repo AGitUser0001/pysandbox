@@ -6,8 +6,7 @@
 
 use std::sync::Arc;
 
-#[cfg_attr(not(windows), allow(unused_imports))]
-use cap_fs_ext::{DirExt, MetadataExt as CapMetadataExt};
+use cap_fs_ext::MetadataExt as _;
 use system_interface::fs::FileIoExt;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
