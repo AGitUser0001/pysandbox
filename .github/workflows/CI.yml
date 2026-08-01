@@ -136,7 +136,8 @@ jobs:
           python -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-xdist
       - name: Test installed wheel
-        run: python -m pytest -n auto --dist worksteal tests
+        working-directory: tests
+        run: python -m pytest -n auto --dist worksteal .
       - name: Set up free-threaded Python
         id: python314t
         uses: actions/setup-python@v6
@@ -148,12 +149,13 @@ jobs:
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-xdist
       - name: Test free-threaded wheel
+        working-directory: tests
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
           '${{ steps.python314t.outputs.python-path }}'
-          -m pytest -n auto --dist worksteal tests
+          -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -239,18 +241,20 @@ jobs:
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-xdist
       - name: Test installed wheel
+        working-directory: tests
         run: >-
           & '${{ steps.python312.outputs.python-path }}'
-          -m pytest -n auto --dist worksteal tests
+          -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
         run: >-
           & '${{ steps.python314t.outputs.python-path }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-xdist
       - name: Test free-threaded wheel
+        working-directory: tests
         run: |
           & '${{ steps.python314t.outputs.python-path }}' -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
-          & '${{ steps.python314t.outputs.python-path }}' -m pytest -n auto --dist worksteal tests
+          & '${{ steps.python314t.outputs.python-path }}' -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -328,21 +332,23 @@ jobs:
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-xdist
       - name: Test installed wheel
+        working-directory: tests
         run: >-
           '${{ steps.python312.outputs.python-path }}'
-          -m pytest -n auto --dist worksteal tests
+          -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-xdist
       - name: Test free-threaded wheel
+        working-directory: tests
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
           '${{ steps.python314t.outputs.python-path }}'
-          -m pytest -n auto --dist worksteal tests
+          -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
