@@ -16,13 +16,18 @@ on:
     types:
       - published
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to publish
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  cancel-in-progress: ${{ github.event_name != 'release' && inputs.release_tag == '' }}
 
 jobs:
   checks:
@@ -362,7 +367,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'release' }}
+    if: ${{ github.event_name == 'release' || inputs.release_tag != '' }}
     needs:
       - linux
       - windows
@@ -377,8 +382,8 @@ jobs:
       - uses: actions/download-artifact@v7
       - name: Package component runtime
         env:
-          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ github.event.release.tag_name }}.tar.gz
-        run: tar -C component-runtime -czf "$RUNTIME_ARCHIVE" .
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: tar -C component-runtime -czf "pysandbox-component-runtime-$RELEASE_TAG.tar.gz" .
       - name: Generate artifact attestation
         uses: actions/attest@v4
         with:
@@ -388,8 +393,9 @@ jobs:
       - name: Attach artifacts to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ github.event.release.tag_name }}.tar.gz
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ github.event.release.tag_name || inputs.release_tag }}.tar.gz
         run: gh release upload "$RELEASE_TAG" wheels-*/* "$RUNTIME_ARCHIVE" --clobber
       - name: Install uv
         uses: astral-sh/setup-uv@v7
