@@ -5,7 +5,7 @@ echo 'rust tests:'
 cargo test --workspace; rust_status=$?
 
 echo 'python tests:'
-uv run python -m unittest discover -s tests -v; python_status=$?
+uv run pytest -n auto --dist worksteal tests; python_status=$?
 
 if [ $rust_status -ne 0 ] || [ $python_status -ne 0 ]; then
   exit 1

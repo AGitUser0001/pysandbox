@@ -1,5 +1,4 @@
 import asyncio
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -83,7 +82,7 @@ class DirectoryVfs:
     return local
 
 
-class VfsTests(unittest.IsolatedAsyncioTestCase):
+class TestVfs:
   async def test_overload_error_is_not_cached(self) -> None:
     vfs = MemoryVfs()
     runtime = PythonRuntime(
@@ -115,28 +114,25 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
         timeout=DISPATCH_TEST_TIMEOUT,
       )
       completed_results = await asyncio.gather(*completed)
-      self.assertTrue(
-        any(
-          "host dispatch queue is full" in (result.error or "")
-          for result in completed_results
-        ),
-        completed_results,
-      )
+      assert any(
+        "host dispatch queue is full" in (result.error or "")
+        for result in completed_results
+      ), completed_results
 
       overloaded = await asyncio.wait_for(
         runtime.execute("import hello"),
         timeout=DISPATCH_TEST_TIMEOUT,
       )
-      self.assertIsNotNone(overloaded.error)
-      self.assertEqual(vfs.calls, [])
+      assert overloaded.error is not None
+      assert vfs.calls == []
 
       release.set()
       await asyncio.gather(first, *fillers)
       recovered = await runtime.execute(
         "import hello\nprint(hello.value, flush=True)",
       )
-      self.assertIsNone(recovered.error)
-      self.assertEqual(recovered.stdout, b"42\n")
+      assert recovered.error is None
+      assert recovered.stdout == b"42\n"
     finally:
       release.set()
       pending = [first] if first is not None else []
@@ -152,14 +148,14 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     runtime = PythonRuntime(vfs=vfs, cache_vfs=True)
     try:
       missing = await runtime.execute("import late")
-      self.assertIsNotNone(missing.error)
+      assert missing.error is not None
 
       vfs.read_errors.remove("/late.py")
       available = await runtime.execute(
         "import late\nprint(late.value, flush=True)",
       )
-      self.assertIsNone(available.error)
-      self.assertEqual(available.stdout, b"7\n")
+      assert available.error is None
+      assert available.stdout == b"7\n"
     finally:
       await runtime.close()
 
@@ -173,18 +169,18 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
     )
     try:
       missing = await cached_runtime.execute("import late")
-      self.assertIsNotNone(missing.error)
+      assert missing.error is not None
 
       cached_vfs.read_errors.remove("/late.py")
       still_missing = await cached_runtime.execute("import late")
-      self.assertIsNotNone(still_missing.error)
+      assert still_missing.error is not None
 
       await cached_runtime.invalidate_vfs("/late.py")
       available = await cached_runtime.execute(
         "import late\nprint(late.value, flush=True)",
       )
-      self.assertIsNone(available.error)
-      self.assertEqual(available.stdout, b"8\n")
+      assert available.error is None
+      assert available.stdout == b"8\n"
     finally:
       await cached_runtime.close()
 
@@ -197,28 +193,28 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
         "import hello\n"
         "print(hello.value, sys.dont_write_bytecode, flush=True)\n",
       )
-      self.assertIsNone(result.error, vfs.calls)
-      self.assertEqual(result.stdout, b"42 True\n")
+      assert result.error is None, vfs.calls
+      assert result.stdout == b"42 True\n"
 
       initial_reads = vfs.calls.count(("read", "/hello.py"))
       second = await runtime.execute(
         "import sys\nimport hello\nprint(hello.value, flush=True)\n",
       )
-      self.assertIsNone(second.error)
-      self.assertEqual(vfs.calls.count(("read", "/hello.py")), initial_reads)
-      self.assertEqual(vfs.calls.count(("stat", "/hello.py")), 1)
+      assert second.error is None
+      assert vfs.calls.count(("read", "/hello.py")) == initial_reads
+      assert vfs.calls.count(("stat", "/hello.py")) == 1
 
       vfs.files["/hello.py"] = b"value = 84\n"
       await runtime.invalidate_vfs("/hello.py")
       third = await runtime.execute(
         "import sys\nimport hello\nprint(hello.value, flush=True)\n",
       )
-      self.assertIsNone(third.error)
-      self.assertEqual(third.stdout, b"84\n")
-      self.assertEqual(vfs.calls.count(("read", "/hello.py")), initial_reads + 1)
+      assert third.error is None
+      assert third.stdout == b"84\n"
+      assert vfs.calls.count(("read", "/hello.py")) == initial_reads + 1
 
       readonly = await runtime.execute("open('/created.txt', 'w')")
-      self.assertIn("PermissionError", readonly.error or "")
+      assert "PermissionError" in (readonly.error or "")
     finally:
       await runtime.close()
 
@@ -239,25 +235,21 @@ class VfsTests(unittest.IsolatedAsyncioTestCase):
         first = await runtime.execute(
           "import package\nprint(package.value, flush=True)",
         )
-        self.assertIsNone(first.error)
-        self.assertEqual(first.stdout, b"1\n")
+        assert first.error is None
+        assert first.stdout == b"1\n"
 
         value_file.write_text("value = 2\n", encoding="utf-8")
         cached = await runtime.execute(
           "import package\nprint(package.value, flush=True)",
         )
-        self.assertIsNone(cached.error)
-        self.assertEqual(cached.stdout, b"1\n")
+        assert cached.error is None
+        assert cached.stdout == b"1\n"
 
         await runtime.invalidate_vfs("/package")
         refreshed = await runtime.execute(
           "import package\nprint(package.value, flush=True)",
         )
-        self.assertIsNone(refreshed.error)
-        self.assertEqual(refreshed.stdout, b"2\n")
+        assert refreshed.error is None
+        assert refreshed.stdout == b"2\n"
       finally:
         await runtime.close()
-
-
-if __name__ == "__main__":
-  unittest.main()

@@ -2,11 +2,10 @@ import base64
 import csv
 import hashlib
 import shutil
-import tempfile
-import unittest
 import zipfile
 from pathlib import Path
 
+import pytest
 from packaging.version import Version
 
 from pysandbox import (
@@ -56,13 +55,10 @@ class LocalIndex:
     return target
 
 
-class PackageTests(unittest.IsolatedAsyncioTestCase):
-  async def asyncSetUp(self) -> None:
-    self.temporary = tempfile.TemporaryDirectory()
-    self.root = Path(self.temporary.name)
-
-  async def asyncTearDown(self) -> None:
-    self.temporary.cleanup()
+class TestPackages:
+  @pytest.fixture(autouse=True)
+  def package_root(self, tmp_path: Path) -> None:
+    self.root = tmp_path
 
   async def test_resolves_dependencies_and_reuses_version_layers(self) -> None:
     dependency = make_wheel(self.root, "dependency", "2.0")
@@ -79,12 +75,10 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
     first = await manager.resolve("application==1.0")
     second = await manager.resolve("application==1.0")
 
-    self.assertEqual(
-      {package.name for package in first.packages}, {"application", "dependency"}
-    )
-    self.assertEqual(first.paths, second.paths)
-    self.assertTrue(all(path.exists() for path in first.paths))
-    self.assertEqual(index.downloads, 2)
+    assert {package.name for package in first.packages} == {"application", "dependency"}
+    assert first.paths == second.paths
+    assert all(path.exists() for path in first.paths)
+    assert index.downloads == 2
 
   async def test_can_disable_dependencies(self) -> None:
     dependency = make_wheel(self.root, "dependency", "2.0")
@@ -103,9 +97,7 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
       Package("application==1.0", include_dependencies=False)
     )
 
-    self.assertEqual(
-      [package.name for package in environment.packages], ["application"]
-    )
+    assert [package.name for package in environment.packages] == ["application"]
 
   async def test_resolves_dependencies_selected_by_extra(self) -> None:
     dependency = make_wheel(self.root, "dependency", "2.0")
@@ -122,10 +114,10 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
 
     environment = await manager.resolve("application[feature]==1.0")
 
-    self.assertEqual(
-      {package.name for package in environment.packages},
-      {"application", "dependency"},
-    )
+    assert {package.name for package in environment.packages} == {
+      "application",
+      "dependency",
+    }
 
   async def test_never_cache_owns_temporary_layers(self) -> None:
     wheel = make_wheel(self.root, "example", "1.0")
@@ -136,9 +128,9 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
 
     environment = await manager.resolve("example==1.0", cache="never")
     paths = environment.paths
-    self.assertTrue(all(path.exists() for path in paths))
+    assert all(path.exists() for path in paths)
     environment.close()
-    self.assertTrue(all(not path.exists() for path in paths))
+    assert all(not path.exists() for path in paths)
 
   async def test_direct_wheel_bypasses_index(self) -> None:
     wheel = make_wheel(self.root, "example", "1.0")
@@ -150,8 +142,8 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
 
     environment = await manager.resolve(Package("example==1.0", source=wheel))
 
-    self.assertIsInstance(environment, PackageEnvironment)
-    self.assertEqual(index.downloads, 0)
+    assert isinstance(environment, PackageEnvironment)
+    assert index.downloads == 0
 
   async def test_source_directory_is_built(self) -> None:
     source = make_source_project(self.root)
@@ -159,23 +151,23 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
 
     environment = await manager.resolve(Package("example==1.0", source=source))
 
-    self.assertEqual([package.name for package in environment.packages], ["example"])
+    assert [package.name for package in environment.packages] == ["example"]
     module = next(path for path in environment.paths if path.name == "example")
-    self.assertEqual((module / "__init__.py").read_text(), "VALUE = 42\n")
-    self.assertFalse(any(source.parent.glob("example-1.0-*.whl")))
+    assert (module / "__init__.py").read_text() == "VALUE = 42\n"
+    assert not any(source.parent.glob("example-1.0-*.whl"))
 
   async def test_source_directory_requires_build(self) -> None:
     source = make_source_project(self.root)
     manager = PackageManager(cache=PackageCache(self.root / "cache"))
 
-    with self.assertRaises(PackageError):
+    with pytest.raises(PackageError):
       await manager.resolve(Package("example==1.0", source=source, build=False))
 
   async def test_source_directory_size_limit(self) -> None:
     source = make_source_project(self.root)
     manager = PackageManager(cache=PackageCache(self.root / "cache"))
 
-    with self.assertRaisesRegex(PackageError, "size limit"):
+    with pytest.raises(PackageError, match="size limit"):
       await manager.resolve(Package("example==1.0", source=source, max_size=1))
 
   async def test_wheel_decompressed_size_limit(self) -> None:
@@ -186,9 +178,9 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
       additional_files={"example/payload": b"x" * (1024 * 1024)},
       compression=zipfile.ZIP_DEFLATED,
     )
-    self.assertLess(wheel.stat().st_size, 10_000)
+    assert wheel.stat().st_size < 10000
 
-    with self.assertRaisesRegex(PackageError, "size limit"):
+    with pytest.raises(PackageError, match="size limit"):
       await PackageCache(self.root / "cache").add(
         wheel,
         build=False,
@@ -198,7 +190,7 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
   async def test_wheel_file_limit(self) -> None:
     wheel = make_wheel(self.root, "example", "1.0")
 
-    with self.assertRaisesRegex(PackageError, "file limit"):
+    with pytest.raises(PackageError, match="file limit"):
       await PackageCache(self.root / "cache").add(
         wheel,
         build=False,
@@ -219,7 +211,7 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
       index=LocalIndex([application, first, second]),
     )
 
-    with self.assertRaisesRegex(PackageError, "dependency limit"):
+    with pytest.raises(PackageError, match="dependency limit"):
       await manager.resolve(Package("application==1.0", max_dependencies=1))
 
   async def test_dependency_size_limit(self) -> None:
@@ -240,7 +232,7 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
       index=LocalIndex([application, dependency]),
     )
 
-    with self.assertRaises(PackageError):
+    with pytest.raises(PackageError):
       await manager.resolve(Package("application==1.0", max_dependency_size=1))
 
   async def test_dependency_file_limit(self) -> None:
@@ -256,7 +248,7 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
       index=LocalIndex([application, dependency]),
     )
 
-    with self.assertRaisesRegex(PackageError, "file limit"):
+    with pytest.raises(PackageError, match="file limit"):
       await manager.resolve(Package("application==1.0", max_dependency_files=3))
 
   async def test_wheel_record_is_validated(self) -> None:
@@ -264,14 +256,14 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
     with zipfile.ZipFile(wheel, "a") as archive:
       archive.writestr("example/unrecorded.py", b"VALUE = 1\n")
 
-    with self.assertRaisesRegex(PackageError, "not mentioned in RECORD"):
+    with pytest.raises(PackageError, match="not mentioned in RECORD"):
       await PackageCache(self.root / "cache").add(wheel, build=False)
 
   async def test_package_directory_is_importable_by_guest(self) -> None:
-    await self.assert_guest_import(single_file=False)
+    await self._check_guest_import(single_file=False)
 
   async def test_single_file_module_is_importable_by_guest(self) -> None:
-    await self.assert_guest_import(single_file=True)
+    await self._check_guest_import(single_file=True)
 
   async def test_cbor2_uses_canonical_site_packages(self) -> None:
     runtime = PythonRuntime()
@@ -294,13 +286,10 @@ print(
     finally:
       await runtime.close()
 
-    self.assertEqual(result.reason, TerminationReason.COMPLETED)
-    self.assertEqual(
-      result.text,
-      "/python/lib/python3.14/site-packages/cbor2/__init__.py\n[]\n",
-    )
+    assert result.reason == TerminationReason.COMPLETED
+    assert result.text == "/python/lib/python3.14/site-packages/cbor2/__init__.py\n[]\n"
 
-  async def assert_guest_import(self, *, single_file: bool) -> None:
+  async def _check_guest_import(self, *, single_file: bool) -> None:
     wheel = make_wheel(self.root, "example", "1.0", single_file=single_file)
     runtime = PythonRuntime(
       package_cache=PackageCache(self.root / "cache"),
@@ -316,8 +305,8 @@ print(
     finally:
       await runtime.close()
 
-    self.assertEqual(result.reason, TerminationReason.COMPLETED)
-    self.assertEqual(result.text, "1.0\n")
+    assert result.reason == TerminationReason.COMPLETED
+    assert result.text == "1.0\n"
 
 
 def make_wheel(

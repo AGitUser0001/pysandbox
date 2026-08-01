@@ -2,20 +2,21 @@ import asyncio
 import os
 import sys
 import tempfile
-import unittest
 from pathlib import Path
+
+import pytest
 
 from pysandbox import _core
 from pysandbox.rpc import RpcContext
 from pysandbox.runtime import TerminationReason, component_paths
 
 
-class CoreTests(unittest.IsolatedAsyncioTestCase):
+class TestCore:
   def test_protocol_version(self) -> None:
-    self.assertEqual(_core.protocol_version(), 5)
+    assert _core.protocol_version() == 5
 
   async def test_tokio_awaitable(self) -> None:
-    self.assertIsNone(await _core.sleep(0))
+    assert await _core.sleep(0) is None
 
   async def test_sandbox_process_health_and_shutdown(self) -> None:
     component, python_root = component_paths()
@@ -34,10 +35,10 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         executable_arguments=["-m", "pysandbox._sandboxd"],
         worker_queue_capacity=1,
       )
-      self.assertIsNone(await sandbox.health())
-      with self.assertRaisesRegex(ValueError, "timeout must be"):
+      assert await sandbox.health() is None
+      with pytest.raises(ValueError, match="timeout must be"):
         sandbox.run("pass", timeout=0)
-      with self.assertRaisesRegex(ValueError, "cpu_share_weight"):
+      with pytest.raises(ValueError, match="cpu_share_weight"):
         sandbox.run("pass", cpu_share_weight=0)
 
       def add(context: RpcContext, /, a: int, b: int) -> int:
@@ -60,44 +61,40 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         'print(await call("multiply", 3, 4), flush=True)',
         rpc_methods=["add", "multiply"],
       )
-      self.assertIsNone(rpc_result.error)
-      self.assertEqual(rpc_result.stdout, b"7\n12\n")
+      assert rpc_result.error is None
+      assert rpc_result.stdout == b"7\n12\n"
 
       limited_rpc = await sandbox.execute(
         'await call("add", 2, 5)',
         rpc_methods=["add"],
         max_guest_rpc_bytes=1,
       )
-      self.assertIsNotNone(limited_rpc.error)
-      self.assertIn(
-        "guest RPC payload exceeded 1 bytes",
-        limited_rpc.error or "",
-      )
+      assert limited_rpc.error is not None
+      assert "guest RPC payload exceeded 1 bytes" in (limited_rpc.error or "")
 
       result = await sandbox.execute(
         "value = globals().get('value', 0) + 1\nprint(value, flush=True)"
       )
-      self.assertIsNone(result.error)
-      self.assertEqual(result.stdout, b"1\n")
-      self.assertEqual(
-        [(event.source, event.data) for event in result.output],
-        [("stdout", b"1\n")],
-      )
+      assert result.error is None
+      assert result.stdout == b"1\n"
+      assert [(event.source, event.data) for event in result.output] == [
+        ("stdout", b"1\n")
+      ]
 
       result = await sandbox.execute("value += 1\nprint(value, flush=True)")
-      self.assertIsNone(result.error)
-      self.assertEqual(result.stdout, b"2\n")
+      assert result.error is None
+      assert result.stdout == b"2\n"
 
       isolated = await sandbox.execute(
         "print(globals().get('value', 'missing'), flush=True)",
         worker_id=1,
       )
-      self.assertIsNone(isolated.error)
-      self.assertEqual(isolated.stdout, b"missing\n")
+      assert isolated.error is None
+      assert isolated.stdout == b"missing\n"
 
       result = await sandbox.execute("value += 1\nprint(value, flush=True)")
-      self.assertIsNone(result.error)
-      self.assertEqual(result.stdout, b"3\n")
+      assert result.error is None
+      assert result.stdout == b"3\n"
 
       execution = sandbox.run(
         "def scale(number, factor=2):\n"
@@ -116,18 +113,17 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         if b"".join(event.data for event in execution.output) == b"spin-ready\n":
           break
         await _core.sleep(10)
-      self.assertEqual(
-        [(event.source, event.data) for event in execution.output],
-        [("stdout", b"spin-ready\n")],
-      )
-      self.assertEqual(await execution.call(("scale",), None, 5, factor=3), 24)
-      self.assertEqual(await execution.call(("async_scale",), None, 7), 10)
+      assert [(event.source, event.data) for event in execution.output] == [
+        ("stdout", b"spin-ready\n")
+      ]
+      assert await execution.call(("scale",), None, 5, factor=3) == 24
+      assert await execution.call(("async_scale",), None, 7) == 10
       await execution.set_limits(max_guest_rpc_bytes=1)
-      with self.assertRaisesRegex(RuntimeError, "guest RPC payload exceeded 1 bytes"):
+      with pytest.raises(RuntimeError, match="guest RPC payload exceeded 1 bytes"):
         await execution.call(("large_result",), None)
       await execution.add_fuel(0, cap=1)
       exhausted = await asyncio.wait_for(execution.result(), timeout=2)
-      self.assertIsNotNone(exhausted.error)
+      assert exhausted.error is not None
 
       execution = sandbox.run(
         'print("busy-ready", flush=True)\nwhile True:\n  pass',
@@ -137,20 +133,19 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         if b"".join(event.data for event in execution.output) == b"busy-ready\n":
           break
         await _core.sleep(10)
-      self.assertEqual(
-        [(event.source, event.data) for event in execution.output],
-        [("stdout", b"busy-ready\n")],
-      )
+      assert [(event.source, event.data) for event in execution.output] == [
+        ("stdout", b"busy-ready\n")
+      ]
       await execution.set_fuel(1)
       exhausted = await asyncio.wait_for(execution.result(), timeout=2)
-      self.assertIsNotNone(exhausted.error)
+      assert exhausted.error is not None
 
       timed_out = await sandbox.execute(
         "while True:\n  pass",
         worker_id=2,
         timeout=0.05,
       )
-      self.assertIsNotNone(timed_out.error)
+      assert timed_out.error is not None
 
       busy = sandbox.run(
         'print("queue-ready", flush=True)\nawait call("wait_for_queue_gate")',
@@ -167,17 +162,14 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         sandbox.execute("pass", worker_id=3),
         timeout=2,
       )
-      self.assertEqual(
-        overloaded.reason,
-        TerminationReason.INFRASTRUCTURE_ERROR.value,
-      )
-      self.assertEqual(overloaded.error, "worker command queue is full")
+      assert overloaded.reason == TerminationReason.INFRASTRUCTURE_ERROR.value
+      assert overloaded.error == "worker command queue is full"
 
       queue_gate.set()
       busy_result = await asyncio.wait_for(busy.result(), timeout=2)
-      self.assertIsNone(busy_result.error)
+      assert busy_result.error is None
       queued_result = await asyncio.wait_for(queued.result(), timeout=2)
-      self.assertIsNone(queued_result.error)
-      self.assertEqual(queued_result.stdout, b"queued\n")
+      assert queued_result.error is None
+      assert queued_result.stdout == b"queued\n"
 
-      self.assertIsNone(await sandbox.close())
+      assert await sandbox.close() is None

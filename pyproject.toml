@@ -52,8 +52,14 @@ build-backend = "maturin"
 [dependency-groups]
 dev = [
   "componentize-py",
+  "pytest",
+  "pytest-asyncio",
+  "pytest-xdist",
   "ruff",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.maturin]
 manifest-path = "rust/pysandbox-native/Cargo.toml"
