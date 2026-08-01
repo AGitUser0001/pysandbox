@@ -8,11 +8,13 @@ def main() -> None:
 
   from . import _core
 
-  if len(sys.argv) != 8:
+  if len(sys.argv) != 12:
     raise SystemExit(
       "usage: python -m pysandbox._sandboxd "
       "<socket-name> <component> <python-root> <max-ipc-frame-bytes> "
       "<worker-queue-capacity> <cache-vfs> <cache-vfs-negative>"
+      " <cpu-share-enabled> <cpu-share-limit-percent>"
+      " <cpu-share-sample-interval-ms> <cpu-share-activity-timeout-ms>"
     )
   _core.run_sandboxd(
     sys.argv[1],
@@ -22,6 +24,10 @@ def main() -> None:
     int(sys.argv[5]),
     sys.argv[6] == "true",
     sys.argv[7] == "true",
+    sys.argv[8] == "true",
+    None if sys.argv[9] == "none" else float(sys.argv[9]),
+    int(sys.argv[10]),
+    int(sys.argv[11]),
   )
 
 

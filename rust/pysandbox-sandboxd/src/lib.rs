@@ -1,9 +1,11 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
 pub mod component_worker;
+mod cpu_share;
 mod remote_vfs;
 pub mod server;
 
@@ -53,6 +55,32 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         })
         .transpose()?
         .unwrap_or(false);
+    let cpu_share_enabled = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!(usage()))?
+        .parse()?;
+    let cpu_share_limit_percent = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!(usage()))?;
+    let cpu_share_limit_percent = if cpu_share_limit_percent == "none" {
+        None
+    } else {
+        Some(cpu_share_limit_percent.parse()?)
+    };
+    let cpu_share_sample_interval = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!(usage()))?
+        .parse()
+        .map(Duration::from_millis)?;
+    let cpu_share_activity_timeout = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!(usage()))?
+        .parse()
+        .map(Duration::from_millis)?;
     if arguments.next().is_some() {
         bail!(usage());
     }
@@ -65,11 +93,17 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         worker_queue_capacity,
         cache_vfs,
         cache_vfs_negative,
+        cpu_share_enabled,
+        cpu_share_limit_percent,
+        cpu_share_sample_interval,
+        cpu_share_activity_timeout,
     )
     .await
 }
 
 fn usage() -> &'static str {
     "usage: pysandbox-sandboxd <socket-name> <component> <python-root> \
-     <max-ipc-frame-bytes> <worker-queue-capacity> [cache-vfs] [cache-vfs-negative]"
+     <max-ipc-frame-bytes> <worker-queue-capacity> <cache-vfs> <cache-vfs-negative> \
+     <cpu-share-enabled> <cpu-share-limit-percent> <cpu-share-sample-interval-ms> \
+     <cpu-share-activity-timeout-ms>"
 }

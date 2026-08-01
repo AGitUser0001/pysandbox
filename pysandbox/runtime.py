@@ -2,6 +2,7 @@ import asyncio
 import builtins
 import itertools
 import keyword
+import math
 import sys
 import tempfile
 from collections import UserList
@@ -20,6 +21,7 @@ from .vfs import VirtualFileSystem
 
 __all__ = [
   "AddFuel",
+  "CpuShareConfig",
   "Output",
   "OutputEvent",
   "PythonRuntime",
@@ -41,6 +43,26 @@ class RuntimeSetupError(Exception):
 WorkerStoppedError = _core.WorkerStoppedError
 
 
+@dataclass(frozen=True, slots=True)
+class CpuShareConfig:
+  enabled: bool = False
+  limit_percent: float | None = None
+  sample_interval: float = 0.1
+  activity_timeout: float = 0.3
+
+  def __post_init__(self) -> None:
+    if self.limit_percent is not None and (
+      not math.isfinite(self.limit_percent) or self.limit_percent <= 0
+    ):
+      raise ValueError("cpu_share.limit_percent must be positive and finite")
+    for name, value in (
+      ("sample_interval", self.sample_interval),
+      ("activity_timeout", self.activity_timeout),
+    ):
+      if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"cpu_share.{name} must be positive and finite")
+
+
 class TerminationReason(StrEnum):
   COMPLETED = "completed"
   GUEST_ERROR = "guest_error"
@@ -60,6 +82,7 @@ class RuntimeLimits:
   max_guest_rpc_bytes: int = 10 * 1024 * 1024
   guest_dispatch_request_concurrency: int = 16
   guest_dispatch_request_queue_capacity: int = 64
+  cpu_share_weight: int = 1
   fuel: int = 2**64 - 1
   timeout: float | None = None
 
@@ -70,6 +93,8 @@ class RuntimeLimits:
       raise ValueError(
         "guest_dispatch_request_queue_capacity must be positive",
       )
+    if self.cpu_share_weight <= 0:
+      raise ValueError("cpu_share_weight must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +215,7 @@ class PythonRuntime:
     worker_queue_capacity: int = 256,
     host_dispatch_concurrency: int = 64,
     host_dispatch_queue_capacity: int = 256,
+    cpu_share: CpuShareConfig | None = None,
     vfs: VirtualFileSystem | None = None,
     cache_vfs: bool = False,
     cache_vfs_negative: bool = False,
@@ -207,6 +233,7 @@ class PythonRuntime:
     self.worker_queue_capacity = worker_queue_capacity
     self.host_dispatch_concurrency = host_dispatch_concurrency
     self.host_dispatch_queue_capacity = host_dispatch_queue_capacity
+    self.cpu_share = cpu_share or CpuShareConfig()
     self.vfs = vfs
     self.cache_vfs = cache_vfs
     self.cache_vfs_negative = cache_vfs_negative
@@ -347,6 +374,16 @@ class PythonRuntime:
           host_dispatch_queue_capacity=self.host_dispatch_queue_capacity,
           cache_vfs=self.cache_vfs,
           cache_vfs_negative=self.cache_vfs_negative,
+          cpu_share_enabled=self.cpu_share.enabled,
+          cpu_share_limit_percent=self.cpu_share.limit_percent,
+          cpu_share_sample_interval_ms=max(
+            1,
+            round(self.cpu_share.sample_interval * 1_000),
+          ),
+          cpu_share_activity_timeout_ms=max(
+            1,
+            round(self.cpu_share.activity_timeout * 1_000),
+          ),
         )
       except BaseException as error:
         self._socket_directory.cleanup()
@@ -477,12 +514,16 @@ class Worker:
     max_memory_bytes: int | None = None,
     max_output_bytes: int | None = None,
     max_guest_rpc_bytes: int | None = None,
+    cpu_share_weight: int | None = None,
     timeout: float | None = None,
   ) -> None:
+    if cpu_share_weight is not None and cpu_share_weight <= 0:
+      raise ValueError("cpu_share_weight must be positive")
     await (await self._execution).set_limits(
       max_memory_bytes=max_memory_bytes,
       max_output_bytes=max_output_bytes,
       max_guest_rpc_bytes=max_guest_rpc_bytes,
+      cpu_share_weight=cpu_share_weight,
       timeout=timeout,
     )
 
@@ -521,6 +562,7 @@ class Worker:
         guest_dispatch_request_queue_capacity=(
           self._limits.guest_dispatch_request_queue_capacity
         ),
+        cpu_share_weight=self._limits.cpu_share_weight,
         fuel=self._limits.fuel,
         timeout=self._limits.timeout,
       )

@@ -19,6 +19,10 @@ def run_sandboxd(
   worker_queue_capacity: int,
   cache_vfs: bool,
   cache_vfs_negative: bool,
+  cpu_share_enabled: bool,
+  cpu_share_limit_percent: float | None,
+  cpu_share_sample_interval_ms: int,
+  cpu_share_activity_timeout_ms: int,
 ) -> None: ...
 
 class SandboxProcess:
@@ -40,6 +44,7 @@ class SandboxProcess:
     max_guest_rpc_bytes: int = 10 * 1024 * 1024,
     guest_dispatch_request_concurrency: int = 16,
     guest_dispatch_request_queue_capacity: int = 64,
+    cpu_share_weight: int = 1,
     fuel: int = 2**64 - 1,
     timeout: float | None = None,
   ) -> Execution: ...
@@ -55,6 +60,7 @@ class SandboxProcess:
     max_guest_rpc_bytes: int = 10 * 1024 * 1024,
     guest_dispatch_request_concurrency: int = 16,
     guest_dispatch_request_queue_capacity: int = 64,
+    cpu_share_weight: int = 1,
     fuel: int = 2**64 - 1,
     timeout: float | None = None,
   ) -> Awaitable[ExecutionResult]: ...
@@ -85,6 +91,7 @@ class Execution:
     max_memory_bytes: int | None = None,
     max_output_bytes: int | None = None,
     max_guest_rpc_bytes: int | None = None,
+    cpu_share_weight: int | None = None,
     timeout: float | None = None,
   ) -> Awaitable[None]: ...
 
@@ -119,4 +126,8 @@ def start_sandbox(
   host_dispatch_queue_capacity: int = 256,
   cache_vfs: bool = False,
   cache_vfs_negative: bool = False,
+  cpu_share_enabled: bool = False,
+  cpu_share_limit_percent: float | None = None,
+  cpu_share_sample_interval_ms: int = 100,
+  cpu_share_activity_timeout_ms: int = 300,
 ) -> Awaitable[SandboxProcess]: ...

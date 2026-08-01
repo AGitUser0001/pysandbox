@@ -28,10 +28,26 @@ pub async fn serve(
     worker_queue_capacity: usize,
     cache_vfs: bool,
     cache_vfs_negative: bool,
+    cpu_share_enabled: bool,
+    cpu_share_limit_percent: Option<f64>,
+    cpu_share_sample_interval: Duration,
+    cpu_share_activity_timeout: Duration,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         worker_queue_capacity > 0,
         "worker queue capacity must be positive"
+    );
+    anyhow::ensure!(
+        cpu_share_sample_interval > Duration::ZERO,
+        "CPU share sample interval must be positive"
+    );
+    anyhow::ensure!(
+        cpu_share_activity_timeout > Duration::ZERO,
+        "CPU share activity timeout must be positive"
+    );
+    anyhow::ensure!(
+        cpu_share_limit_percent.is_none_or(|percent| percent.is_finite() && percent > 0.0),
+        "CPU share limit percent must be positive and finite"
     );
     let name = if GenericNamespaced::is_supported() {
         socket_name.to_ns_name::<GenericNamespaced>()?
@@ -51,6 +67,10 @@ pub async fn serve(
         worker_queue_capacity,
         cache_vfs,
         cache_vfs_negative,
+        cpu_share_enabled,
+        cpu_share_limit_percent,
+        cpu_share_sample_interval,
+        cpu_share_activity_timeout,
     )
     .await
 }
@@ -63,6 +83,10 @@ async fn serve_connection(
     worker_queue_capacity: usize,
     cache_vfs: bool,
     cache_vfs_negative: bool,
+    cpu_share_enabled: bool,
+    cpu_share_limit_percent: Option<f64>,
+    cpu_share_sample_interval: Duration,
+    cpu_share_activity_timeout: Duration,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = connection.split();
     let (outgoing, mut outgoing_receiver) = mpsc::channel::<Frame>(256);
@@ -88,7 +112,14 @@ async fn serve_connection(
             CachePolicy::None
         },
     );
-    let runtime = ComponentRuntime::load(&component_path, vfs.clone())?;
+    let runtime = ComponentRuntime::load(
+        &component_path,
+        vfs.clone(),
+        cpu_share_enabled,
+        cpu_share_limit_percent,
+        cpu_share_sample_interval,
+        cpu_share_activity_timeout,
+    )?;
 
     loop {
         let frame = read_frame(&mut reader, max_ipc_frame_bytes).await?;
@@ -480,6 +511,7 @@ async fn apply_control(
             max_memory_bytes,
             max_output_bytes,
             max_guest_rpc_bytes,
+            cpu_share_weight,
             timeout_ms,
         } => {
             control
@@ -488,6 +520,7 @@ async fn apply_control(
                     max_memory_bytes.map(usize::try_from).transpose()?,
                     max_output_bytes.map(usize::try_from).transpose()?,
                     max_guest_rpc_bytes.map(usize::try_from).transpose()?,
+                    cpu_share_weight,
                     timeout_ms.map(Duration::from_millis),
                 )
                 .await
@@ -515,10 +548,15 @@ async fn send_control_result(
 fn execution_limits(
     limits: pysandbox_protocol::ExecutionLimits,
 ) -> anyhow::Result<ExecutionLimits> {
+    anyhow::ensure!(
+        limits.cpu_share_weight > 0,
+        "CPU share weight must be positive"
+    );
     Ok(ExecutionLimits {
         max_memory_bytes: usize::try_from(limits.max_memory_bytes)?,
         max_output_bytes: usize::try_from(limits.max_output_bytes)?,
         max_guest_rpc_bytes: usize::try_from(limits.max_guest_rpc_bytes)?,
+        cpu_share_weight: limits.cpu_share_weight,
         fuel: limits.fuel,
         timeout: limits.timeout_ms.map(Duration::from_millis),
     })

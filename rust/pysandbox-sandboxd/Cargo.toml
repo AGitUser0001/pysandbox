@@ -14,6 +14,7 @@ eryx-vfs = { path = "../../vendor/eryx-vfs" }
 futures-util.workspace = true
 interprocess.workspace = true
 pysandbox-protocol = { path = "../pysandbox-protocol" }
+sysinfo.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

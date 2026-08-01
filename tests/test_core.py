@@ -12,7 +12,7 @@ from pysandbox.runtime import TerminationReason, component_paths
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
   def test_protocol_version(self) -> None:
-    self.assertEqual(_core.protocol_version(), 3)
+    self.assertEqual(_core.protocol_version(), 4)
 
   async def test_tokio_awaitable(self) -> None:
     self.assertIsNone(await _core.sleep(0))
@@ -37,6 +37,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
       self.assertIsNone(await sandbox.health())
       with self.assertRaisesRegex(ValueError, "timeout must be"):
         sandbox.run("pass", timeout=0)
+      with self.assertRaisesRegex(ValueError, "cpu_share_weight"):
+        sandbox.run("pass", cpu_share_weight=0)
 
       def add(context: RpcContext, /, a: int, b: int) -> int:
         return a + b

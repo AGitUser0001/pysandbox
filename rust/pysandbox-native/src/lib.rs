@@ -57,6 +57,10 @@ fn run_sandboxd(
     worker_queue_capacity: usize,
     cache_vfs: bool,
     cache_vfs_negative: bool,
+    cpu_share_enabled: bool,
+    cpu_share_limit_percent: Option<f64>,
+    cpu_share_sample_interval_ms: u64,
+    cpu_share_activity_timeout_ms: u64,
 ) -> PyResult<()> {
     py.detach(move || {
         let runtime = tokio::runtime::Runtime::new().map_err(runtime_error)?;
@@ -69,6 +73,10 @@ fn run_sandboxd(
                 worker_queue_capacity,
                 cache_vfs,
                 cache_vfs_negative,
+                cpu_share_enabled,
+                cpu_share_limit_percent,
+                Duration::from_millis(cpu_share_sample_interval_ms),
+                Duration::from_millis(cpu_share_activity_timeout_ms),
             ))
             .map_err(runtime_error)
     })
@@ -186,6 +194,7 @@ impl SandboxProcess {
         max_guest_rpc_bytes = 10 * 1024 * 1024,
         guest_dispatch_request_concurrency = 16,
         guest_dispatch_request_queue_capacity = 64,
+        cpu_share_weight = 1,
         fuel = u64::MAX,
         timeout = None,
     ))]
@@ -202,6 +211,7 @@ impl SandboxProcess {
         max_guest_rpc_bytes: u64,
         guest_dispatch_request_concurrency: u64,
         guest_dispatch_request_queue_capacity: u64,
+        cpu_share_weight: u64,
         fuel: u64,
         timeout: Option<f64>,
     ) -> PyResult<Py<NativeExecution>> {
@@ -217,6 +227,7 @@ impl SandboxProcess {
             guest_dispatch_request_concurrency,
             guest_dispatch_request_queue_capacity,
         )?;
+        validate_cpu_share_weight(cpu_share_weight)?;
         let payload = encode_payload(&ExecuteRequest {
             program,
             rpc_methods,
@@ -230,6 +241,7 @@ impl SandboxProcess {
                 max_guest_rpc_bytes,
                 guest_dispatch_request_concurrency,
                 guest_dispatch_request_queue_capacity,
+                cpu_share_weight,
                 fuel,
                 timeout_ms,
             },
@@ -268,6 +280,7 @@ impl SandboxProcess {
         max_guest_rpc_bytes = 10 * 1024 * 1024,
         guest_dispatch_request_concurrency = 16,
         guest_dispatch_request_queue_capacity = 64,
+        cpu_share_weight = 1,
         fuel = u64::MAX,
         timeout = None,
     ))]
@@ -284,6 +297,7 @@ impl SandboxProcess {
         max_guest_rpc_bytes: u64,
         guest_dispatch_request_concurrency: u64,
         guest_dispatch_request_queue_capacity: u64,
+        cpu_share_weight: u64,
         fuel: u64,
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -295,6 +309,7 @@ impl SandboxProcess {
             guest_dispatch_request_concurrency,
             guest_dispatch_request_queue_capacity,
         )?;
+        validate_cpu_share_weight(cpu_share_weight)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if closed.load(Ordering::Acquire) {
@@ -314,6 +329,7 @@ impl SandboxProcess {
                     max_guest_rpc_bytes,
                     guest_dispatch_request_concurrency,
                     guest_dispatch_request_queue_capacity,
+                    cpu_share_weight,
                     fuel,
                     timeout_ms,
                 },
@@ -423,6 +439,10 @@ impl SandboxProcess {
     host_dispatch_queue_capacity = 256,
     cache_vfs = false,
     cache_vfs_negative = false,
+    cpu_share_enabled = false,
+    cpu_share_limit_percent = None,
+    cpu_share_sample_interval_ms = 100,
+    cpu_share_activity_timeout_ms = 300,
 ))]
 fn start_sandbox<'py>(
     py: Python<'py>,
@@ -437,6 +457,10 @@ fn start_sandbox<'py>(
     host_dispatch_queue_capacity: usize,
     cache_vfs: bool,
     cache_vfs_negative: bool,
+    cpu_share_enabled: bool,
+    cpu_share_limit_percent: Option<f64>,
+    cpu_share_sample_interval_ms: u64,
+    cpu_share_activity_timeout_ms: u64,
 ) -> PyResult<Bound<'py, PyAny>> {
     if worker_queue_capacity == 0 {
         return Err(PyValueError::new_err(
@@ -453,6 +477,21 @@ fn start_sandbox<'py>(
             "host_dispatch_queue_capacity must be positive",
         ));
     }
+    if cpu_share_sample_interval_ms == 0 {
+        return Err(PyValueError::new_err(
+            "cpu_share_sample_interval_ms must be positive",
+        ));
+    }
+    if cpu_share_activity_timeout_ms == 0 {
+        return Err(PyValueError::new_err(
+            "cpu_share_activity_timeout_ms must be positive",
+        ));
+    }
+    if cpu_share_limit_percent.is_some_and(|percent| !percent.is_finite() || percent <= 0.0) {
+        return Err(PyValueError::new_err(
+            "cpu_share_limit_percent must be positive and finite",
+        ));
+    }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let mut child = Command::new(executable)
             .args(executable_arguments)
@@ -463,6 +502,13 @@ fn start_sandbox<'py>(
             .arg(worker_queue_capacity.to_string())
             .arg(cache_vfs.to_string())
             .arg(cache_vfs_negative.to_string())
+            .arg(cpu_share_enabled.to_string())
+            .arg(
+                cpu_share_limit_percent
+                    .map_or_else(|| "none".to_owned(), |percent| percent.to_string()),
+            )
+            .arg(cpu_share_sample_interval_ms.to_string())
+            .arg(cpu_share_activity_timeout_ms.to_string())
             .kill_on_drop(true)
             .spawn()
             .map_err(runtime_error)?;
@@ -1408,6 +1454,7 @@ impl NativeExecution {
         max_memory_bytes = None,
         max_output_bytes = None,
         max_guest_rpc_bytes = None,
+        cpu_share_weight = None,
         timeout = None,
     ))]
     fn set_limits<'py>(
@@ -1416,8 +1463,12 @@ impl NativeExecution {
         max_memory_bytes: Option<u64>,
         max_output_bytes: Option<u64>,
         max_guest_rpc_bytes: Option<u64>,
+        cpu_share_weight: Option<u64>,
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(weight) = cpu_share_weight {
+            validate_cpu_share_weight(weight)?;
+        }
         self.update(
             py,
             ExecutionControl::SetLimits {
@@ -1425,6 +1476,7 @@ impl NativeExecution {
                 max_memory_bytes,
                 max_output_bytes,
                 max_guest_rpc_bytes,
+                cpu_share_weight,
                 timeout_ms: timeout_milliseconds(timeout)?,
             },
         )
@@ -1621,6 +1673,13 @@ fn validate_guest_dispatch_limits(concurrency: u64, queue_capacity: u64) -> PyRe
         return Err(PyValueError::new_err(
             "guest_dispatch_request_queue_capacity must be positive",
         ));
+    }
+    Ok(())
+}
+
+fn validate_cpu_share_weight(weight: u64) -> PyResult<()> {
+    if weight == 0 {
+        return Err(PyValueError::new_err("cpu_share_weight must be positive"));
     }
     Ok(())
 }

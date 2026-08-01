@@ -11,6 +11,7 @@ from .packages import (
 from .rpc import RpcContext, RpcHandler, RpcHost
 from .runtime import (
   AddFuel,
+  CpuShareConfig,
   Output,
   OutputEvent,
   PythonRuntime,
@@ -29,6 +30,7 @@ __all__ = [
   "AddFuel",
   "CachePolicy",
   "CachedPackage",
+  "CpuShareConfig",
   "Output",
   "OutputEvent",
   "Package",

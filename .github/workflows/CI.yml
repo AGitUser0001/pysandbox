@@ -54,6 +54,8 @@ jobs:
           cargo fmt --all -- --check
       - name: Test Rust workspace
         run: cargo test --workspace
+      - name: Check dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
 
   runtime:
     name: Component runtime

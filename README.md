@@ -118,6 +118,40 @@ await worker.add_fuel(500_000, cap=2_000_000)
 await worker.set_limits(max_output_bytes=512 * 1024, timeout=60)
 ```
 
+## CPU Sharing
+
+Active workers share the sandbox subprocess's measured CPU capacity. Configure
+the process-wide sampler when creating the runtime:
+
+```python
+from pysandbox import CpuShareConfig, PythonRuntime
+
+runtime = PythonRuntime(
+  cpu_share=CpuShareConfig(
+    enabled=True,
+    limit_percent=100.0,
+    sample_interval=0.1,
+    activity_timeout=0.3,
+  ),
+)
+```
+
+Each execution has an integer weight, defaulting to one:
+
+```python
+worker = runtime.run(program, limits=RuntimeLimits(cpu_share_weight=2))
+await worker.set_limits(cpu_share_weight=4)
+```
+
+`limit_percent=100` caps the whole sandbox subprocess at approximately one
+logical core; `200` permits two. Use `None` for weighted fairness without a
+total CPU ceiling.
+
+Weights are progressive rather than reserved. A worker consumes its first
+weight unit before spilling into its second, so unused units remain available
+to other active workers. CPU sharing is disabled by default. Fuel limits and
+epoch interruption remain active when it is disabled.
+
 ## Output
 
 stdout and stderr are retained as interlaced output events:

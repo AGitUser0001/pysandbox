@@ -22,6 +22,7 @@ use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use crate::cpu_share::{CpuShare, CpuShareConfig, CpuShareWorker};
 use crate::remote_vfs::RemoteVfs;
 
 const EPOCH_INTERVAL: Duration = Duration::from_millis(10);
@@ -226,6 +227,7 @@ pub struct ExecutionLimits {
     pub max_memory_bytes: usize,
     pub max_output_bytes: usize,
     pub max_guest_rpc_bytes: usize,
+    pub cpu_share_weight: u64,
     pub fuel: u64,
     pub timeout: Option<Duration>,
 }
@@ -266,6 +268,10 @@ enum PendingStoreUpdate {
     },
     SetGuestRpcLimit {
         max_guest_rpc_bytes: usize,
+        applied: oneshot::Sender<std::result::Result<(), String>>,
+    },
+    SetCpuShareWeight {
+        weight: u64,
         applied: oneshot::Sender<std::result::Result<(), String>>,
     },
 }
@@ -348,9 +354,13 @@ impl WorkerControl {
         max_memory_bytes: Option<usize>,
         max_output_bytes: Option<usize>,
         max_guest_rpc_bytes: Option<usize>,
+        cpu_share_weight: Option<u64>,
         timeout: Option<Duration>,
     ) -> Result<()> {
         self.ensure_active(execution_id)?;
+        if cpu_share_weight == Some(0) {
+            anyhow::bail!("CPU share weight must be positive");
+        }
         if let Some(max_output_bytes) = max_output_bytes {
             self.output.set_limit(max_output_bytes)?;
         }
@@ -377,6 +387,15 @@ impl WorkerControl {
                     max_guest_rpc_bytes,
                     applied,
                 });
+            updates.push(receiver);
+        }
+        if let Some(weight) = cpu_share_weight {
+            let (applied, receiver) = oneshot::channel();
+            self.state
+                .pending
+                .lock()
+                .expect("worker control lock poisoned")
+                .push(PendingStoreUpdate::SetCpuShareWeight { weight, applied });
             updates.push(receiver);
         }
         if let Some(timeout) = timeout {
@@ -509,7 +528,8 @@ fn reject_pending_store_updates(control: &ExecutionControlState, error: &str) {
             PendingStoreUpdate::SetFuel { applied, .. }
             | PendingStoreUpdate::AddFuel { applied, .. }
             | PendingStoreUpdate::SetMemoryLimit { applied, .. }
-            | PendingStoreUpdate::SetGuestRpcLimit { applied, .. } => applied,
+            | PendingStoreUpdate::SetGuestRpcLimit { applied, .. }
+            | PendingStoreUpdate::SetCpuShareWeight { applied, .. } => applied,
         };
         let _ = applied.send(Err(error.into()));
     }
@@ -536,6 +556,7 @@ struct ComponentState {
     rpc: RpcBridge,
     rpc_methods: HashSet<String>,
     max_guest_rpc_bytes: usize,
+    cpu_share: Arc<CpuShareWorker>,
 }
 
 struct ExecutionStoreLimits {
@@ -805,7 +826,7 @@ fn apply_call_fuel(
     mut store: StoreContextMut<'_, ComponentState>,
     operation: Option<FuelOperation>,
 ) -> std::result::Result<(), String> {
-    match operation {
+    let result = match operation {
         None => Ok(()),
         Some(FuelOperation::Set { fuel }) => {
             store.set_fuel(fuel).map_err(|error| error.to_string())
@@ -815,7 +836,14 @@ fn apply_call_fuel(
             .map(|fuel| fuel.saturating_add(amount))
             .and_then(|fuel| store.set_fuel(cap.map_or(fuel, |cap| fuel.min(cap))))
             .map_err(|error| error.to_string()),
+    };
+    if result.is_ok()
+        && operation.is_some()
+        && let Ok(fuel) = store.get_fuel()
+    {
+        store.data().cpu_share.reset_fuel(fuel);
     }
+    result
 }
 
 pub struct ComponentWorker {
@@ -823,6 +851,7 @@ pub struct ComponentWorker {
     guest: Python,
     output: Output,
     control: WorkerControl,
+    cpu_share: Arc<CpuShareWorker>,
 }
 
 #[derive(Clone)]
@@ -832,17 +861,31 @@ pub struct ComponentRuntime {
     linker: Arc<Linker<ComponentState>>,
     vfs: RemoteVfs,
     hybrid_filesystem: bool,
+    cpu_share: Arc<CpuShare>,
 }
 
 impl ComponentRuntime {
-    pub(crate) fn load(component_path: &Path, vfs: RemoteVfs) -> Result<Self> {
-        Self::load_with_filesystem(component_path, vfs, true)
+    pub(crate) fn load(
+        component_path: &Path,
+        vfs: RemoteVfs,
+        cpu_share_enabled: bool,
+        cpu_share_limit_percent: Option<f64>,
+        cpu_share_sample_interval: Duration,
+        cpu_share_activity_timeout: Duration,
+    ) -> Result<Self> {
+        let mut cpu_share_config = CpuShareConfig::new(DEFAULT_FUEL_YIELD_INTERVAL);
+        cpu_share_config.enabled = cpu_share_enabled;
+        cpu_share_config.limit_percent = cpu_share_limit_percent;
+        cpu_share_config.sample_interval = cpu_share_sample_interval;
+        cpu_share_config.activity_timeout = cpu_share_activity_timeout;
+        Self::load_with_filesystem(component_path, vfs, true, cpu_share_config)
     }
 
     fn load_with_filesystem(
         component_path: &Path,
         vfs: RemoteVfs,
         hybrid_filesystem: bool,
+        cpu_share_config: CpuShareConfig,
     ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model_async(true);
@@ -875,6 +918,7 @@ impl ComponentRuntime {
             linker: Arc::new(linker),
             vfs,
             hybrid_filesystem,
+            cpu_share: CpuShare::start(cpu_share_config),
         })
     }
 }
@@ -919,6 +963,7 @@ impl ComponentWorker {
     ) -> Result<Self> {
         let engine = runtime.engine.clone();
         let output = control.output.clone();
+        let cpu_share = Arc::new(runtime.cpu_share.worker(worker_id));
         let mut wasi = WasiCtxBuilder::new();
         wasi.stdout(CapturedOutputStream {
             output: output.clone(),
@@ -954,10 +999,12 @@ impl ComponentWorker {
                 rpc,
                 rpc_methods: HashSet::new(),
                 max_guest_rpc_bytes: 10 * 1024 * 1024,
+                cpu_share: cpu_share.clone(),
             },
         );
         store.limiter(|state| &mut state.limits);
         let control_state = control.state.clone();
+        let epoch_cpu_share = cpu_share.clone();
         store.epoch_deadline_callback(move |mut store| {
             if control_state.cancelled.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
@@ -975,6 +1022,9 @@ impl ComponentWorker {
             }
 
             let updated = apply_pending_store_updates(store.as_context_mut(), &control_state);
+            if let Ok(fuel) = store.get_fuel() {
+                epoch_cpu_share.observe_fuel(fuel);
+            }
             Ok(if updated {
                 UpdateDeadline::Continue(1)
             } else {
@@ -995,6 +1045,7 @@ impl ComponentWorker {
             guest,
             output,
             control,
+            cpu_share,
         })
     }
 
@@ -1027,11 +1078,13 @@ impl ComponentWorker {
             return Err(error);
         }
         let guest = &self.guest;
+        let cpu_share = self.cpu_share.clone();
         let result = self
             .store
-            .run_concurrent(async move |store| guest.call_run(store).await)
+            .run_concurrent(async move |store| cpu_share.run(guest.call_run(store)).await)
             .await;
 
+        self.cpu_share.finish();
         self.output.finish();
         self.control.finish(execution_id);
 
@@ -1047,6 +1100,7 @@ impl ComponentWorker {
         self.store.data_mut().max_guest_rpc_bytes = limits.max_guest_rpc_bytes;
         self.store.data_mut().limits = ExecutionStoreLimits::new(limits.max_memory_bytes);
         self.store.set_fuel(limits.fuel)?;
+        self.cpu_share.begin(limits.fuel, limits.cpu_share_weight);
         self.store
             .fuel_async_yield_interval(Some(DEFAULT_FUEL_YIELD_INTERVAL))?;
         self.store.set_epoch_deadline(1);
@@ -1090,7 +1144,10 @@ async fn run_build_program(
         pending_vfs_requests,
         crate::remote_vfs::CachePolicy::None,
     );
-    let runtime = ComponentRuntime::load_with_filesystem(component_path, vfs, false)?;
+    let mut cpu_share_config = CpuShareConfig::new(DEFAULT_FUEL_YIELD_INTERVAL);
+    cpu_share_config.enabled = false;
+    let runtime =
+        ComponentRuntime::load_with_filesystem(component_path, vfs, false, cpu_share_config)?;
     let (control, control_receiver, worker_call_receiver) = WorkerControl::new(1);
     let rpc = RpcBridge::new(0, outgoing, next_request_id, pending_guest_calls);
     let mut worker = ComponentWorker::load_with_python_permissions(
@@ -1115,6 +1172,7 @@ async fn run_build_program(
                 max_memory_bytes: 512 * 1024 * 1024,
                 max_output_bytes: 1024 * 1024,
                 max_guest_rpc_bytes: 1,
+                cpu_share_weight: 1,
                 fuel: u64::MAX,
                 timeout: Some(Duration::from_secs(120)),
             },
@@ -1191,6 +1249,9 @@ fn apply_pending_store_updates(
         match update {
             PendingStoreUpdate::SetFuel { fuel, applied } => {
                 let result = store.set_fuel(fuel).map_err(|error| error.to_string());
+                if result.is_ok() {
+                    store.data().cpu_share.reset_fuel(fuel);
+                }
                 let _ = applied.send(result);
             }
             PendingStoreUpdate::AddFuel {
@@ -1203,6 +1264,11 @@ fn apply_pending_store_updates(
                     .map(|fuel| fuel.saturating_add(amount))
                     .and_then(|fuel| store.set_fuel(cap.map_or(fuel, |cap| fuel.min(cap))))
                     .map_err(|error| error.to_string());
+                if result.is_ok()
+                    && let Ok(fuel) = store.get_fuel()
+                {
+                    store.data().cpu_share.reset_fuel(fuel);
+                }
                 let _ = applied.send(result);
             }
             PendingStoreUpdate::SetMemoryLimit {
@@ -1217,6 +1283,10 @@ fn apply_pending_store_updates(
                 applied,
             } => {
                 store.data_mut().max_guest_rpc_bytes = max_guest_rpc_bytes;
+                let _ = applied.send(Ok(()));
+            }
+            PendingStoreUpdate::SetCpuShareWeight { weight, applied } => {
+                store.data().cpu_share.set_weight(weight);
                 let _ = applied.send(Ok(()));
             }
         }

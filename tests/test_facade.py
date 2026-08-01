@@ -3,6 +3,7 @@ import unittest
 
 from pysandbox import (
   AddFuel,
+  CpuShareConfig,
   Output,
   PythonRuntime,
   RpcContext,
@@ -34,6 +35,14 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       "guest_dispatch_request_queue_capacity",
     ):
       RuntimeLimits(guest_dispatch_request_queue_capacity=0)
+    with self.assertRaisesRegex(ValueError, "cpu_share_weight"):
+      RuntimeLimits(cpu_share_weight=0)
+    with self.assertRaisesRegex(ValueError, "sample_interval"):
+      CpuShareConfig(sample_interval=0)
+    with self.assertRaisesRegex(ValueError, "activity_timeout"):
+      CpuShareConfig(activity_timeout=float("inf"))
+    with self.assertRaisesRegex(ValueError, "limit_percent"):
+      CpuShareConfig(enabled=True, limit_percent=0)
 
   async def test_execution_rpc_worker_and_output(self) -> None:
     runtime = PythonRuntime()
@@ -111,6 +120,9 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       await asyncio.sleep(0.15)
       self.assertEqual(await worker.call(("increment",), None), 18)
       await worker.set_limits(max_guest_rpc_bytes=1024)
+      await worker.set_limits(cpu_share_weight=2)
+      with self.assertRaisesRegex(ValueError, "cpu_share_weight"):
+        await worker.set_limits(cpu_share_weight=0)
       await worker.add_fuel(1_000, cap=2**64 - 1)
       await worker.close()
       self.assertTrue(worker.task.done())
