@@ -13,6 +13,7 @@ from pysandbox import (
   Package,
   PackageCache,
   PackageEnvironment,
+  PackageError,
   PackageManager,
   PythonRuntime,
   TerminationReason,
@@ -34,14 +35,22 @@ class LocalIndex:
         filename=path.name,
         url=path.as_uri(),
         sha256=file_hash(path),
+        size=path.stat().st_size,
       )
       for path in self.distributions
       if path.name.split("-")[0].replace("_", "-").lower() == normalized
     ]
 
-  def download(self, artifact: PackageArtifact, destination: Path) -> Path:
+  def download(
+    self,
+    artifact: PackageArtifact,
+    destination: Path,
+    max_bytes: int | None,
+  ) -> Path:
     self.downloads += 1
     source = next(path for path in self.distributions if path.name == artifact.filename)
+    if max_bytes is not None and source.stat().st_size > max_bytes:
+      raise PackageError(f"{source.name} exceeds the {max_bytes}-byte size limit")
     target = destination / source.name
     shutil.copy2(source, target)
     return target
@@ -144,6 +153,120 @@ class PackageTests(unittest.IsolatedAsyncioTestCase):
     self.assertIsInstance(environment, PackageEnvironment)
     self.assertEqual(index.downloads, 0)
 
+  async def test_source_directory_is_built(self) -> None:
+    source = make_source_project(self.root)
+    manager = PackageManager(cache=PackageCache(self.root / "cache"))
+
+    environment = await manager.resolve(Package("example==1.0", source=source))
+
+    self.assertEqual([package.name for package in environment.packages], ["example"])
+    module = next(path for path in environment.paths if path.name == "example")
+    self.assertEqual((module / "__init__.py").read_text(), "VALUE = 42\n")
+    self.assertFalse(any(source.parent.glob("example-1.0-*.whl")))
+
+  async def test_source_directory_requires_build(self) -> None:
+    source = make_source_project(self.root)
+    manager = PackageManager(cache=PackageCache(self.root / "cache"))
+
+    with self.assertRaises(PackageError):
+      await manager.resolve(Package("example==1.0", source=source, build=False))
+
+  async def test_source_directory_size_limit(self) -> None:
+    source = make_source_project(self.root)
+    manager = PackageManager(cache=PackageCache(self.root / "cache"))
+
+    with self.assertRaisesRegex(PackageError, "size limit"):
+      await manager.resolve(Package("example==1.0", source=source, max_size=1))
+
+  async def test_wheel_decompressed_size_limit(self) -> None:
+    wheel = make_wheel(
+      self.root,
+      "example",
+      "1.0",
+      additional_files={"example/payload": b"x" * (1024 * 1024)},
+      compression=zipfile.ZIP_DEFLATED,
+    )
+    self.assertLess(wheel.stat().st_size, 10_000)
+
+    with self.assertRaisesRegex(PackageError, "size limit"):
+      await PackageCache(self.root / "cache").add(
+        wheel,
+        build=False,
+        max_size=10_000,
+      )
+
+  async def test_wheel_file_limit(self) -> None:
+    wheel = make_wheel(self.root, "example", "1.0")
+
+    with self.assertRaisesRegex(PackageError, "file limit"):
+      await PackageCache(self.root / "cache").add(
+        wheel,
+        build=False,
+        max_files=3,
+      )
+
+  async def test_dependency_count_limit(self) -> None:
+    first = make_wheel(self.root, "first", "1.0")
+    second = make_wheel(self.root, "second", "1.0")
+    application = make_wheel(
+      self.root,
+      "application",
+      "1.0",
+      requires=("first", "second"),
+    )
+    manager = PackageManager(
+      cache=PackageCache(self.root / "cache"),
+      index=LocalIndex([application, first, second]),
+    )
+
+    with self.assertRaisesRegex(PackageError, "dependency limit"):
+      await manager.resolve(Package("application==1.0", max_dependencies=1))
+
+  async def test_dependency_size_limit(self) -> None:
+    dependency = make_wheel(
+      self.root,
+      "dependency",
+      "1.0",
+      additional_files={"dependency/payload": b"x" * 1024},
+    )
+    application = make_wheel(
+      self.root,
+      "application",
+      "1.0",
+      requires=("dependency",),
+    )
+    manager = PackageManager(
+      cache=PackageCache(self.root / "cache"),
+      index=LocalIndex([application, dependency]),
+    )
+
+    with self.assertRaises(PackageError):
+      await manager.resolve(Package("application==1.0", max_dependency_size=1))
+
+  async def test_dependency_file_limit(self) -> None:
+    dependency = make_wheel(self.root, "dependency", "1.0")
+    application = make_wheel(
+      self.root,
+      "application",
+      "1.0",
+      requires=("dependency",),
+    )
+    manager = PackageManager(
+      cache=PackageCache(self.root / "cache"),
+      index=LocalIndex([application, dependency]),
+    )
+
+    with self.assertRaisesRegex(PackageError, "file limit"):
+      await manager.resolve(Package("application==1.0", max_dependency_files=3))
+
+  async def test_wheel_record_is_validated(self) -> None:
+    wheel = make_wheel(self.root, "example", "1.0")
+    with zipfile.ZipFile(wheel, "a") as archive:
+      archive.writestr("example/unrecorded.py", b"VALUE = 1\n")
+
+    with self.assertRaisesRegex(PackageError, "not mentioned in RECORD"):
+      await PackageCache(self.root / "cache").add(wheel, build=False)
+
   async def test_package_directory_is_importable_by_guest(self) -> None:
     await self.assert_guest_import(single_file=False)
 
@@ -204,6 +327,8 @@ def make_wheel(
   *,
   requires: tuple[str, ...] = (),
   single_file: bool = False,
+  additional_files: dict[str, bytes] | None = None,
+  compression: int = zipfile.ZIP_STORED,
 ) -> Path:
   normalized = name.replace("-", "_")
   dist_info = f"{normalized}-{version}.dist-info"
@@ -222,6 +347,7 @@ def make_wheel(
     f"{dist_info}/WHEEL": (
       b"Wheel-Version: 1.0\nGenerator: tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     ),
+    **(additional_files or {}),
   }
   records = []
   for path, data in files.items():
@@ -235,10 +361,60 @@ def make_wheel(
   writer = csv.writer(_ListWriter(output), lineterminator="\n")
   writer.writerows(records)
   files[record_path] = "".join(output).encode()
-  with zipfile.ZipFile(wheel, "w") as archive:
+  with zipfile.ZipFile(wheel, "w", compression=compression) as archive:
     for path, data in files.items():
       archive.writestr(path, data)
   return wheel
+
+
+def make_source_project(root: Path) -> Path:
+  source = root / "example-1.0"
+  source.mkdir()
+  (source / "pyproject.toml").write_text(
+    """[build-system]
+requires = []
+build-backend = "backend"
+backend-path = ["."]
+"""
+  )
+  (source / "backend.py").write_text(
+    '''import base64
+import csv
+import hashlib
+import io
+import zipfile
+from pathlib import Path
+
+
+def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+  filename = "example-1.0-py3-none-any.whl"
+  dist_info = "example-1.0.dist-info"
+  files = {
+    "example/__init__.py": b"VALUE = 42\\n",
+    f"{dist_info}/METADATA": (
+      b"Metadata-Version: 2.1\\nName: example\\nVersion: 1.0\\n"
+    ),
+    f"{dist_info}/WHEEL": (
+      b"Wheel-Version: 1.0\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n"
+    ),
+  }
+  record_path = f"{dist_info}/RECORD"
+  output = io.StringIO(newline="")
+  writer = csv.writer(output, lineterminator="\\n")
+  records = []
+  for path, data in files.items():
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+    records.append((path, f"sha256={digest.decode()}", str(len(data))))
+  writer.writerows((*records, (record_path, "", "")))
+  files[record_path] = output.getvalue().encode()
+  target = Path(wheel_directory) / filename
+  with zipfile.ZipFile(target, "w") as archive:
+    for path, data in files.items():
+      archive.writestr(path, data)
+  return filename
+'''
+  )
+  return source
 
 
 class _ListWriter:

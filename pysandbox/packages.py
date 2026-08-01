@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tarfile
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import compat32
 from pathlib import Path
-from typing import Literal, Protocol, Self, cast
+from typing import BinaryIO, Literal, Protocol, Self, cast
 
 from build import ProjectBuilder
 from build.env import DefaultIsolatedEnv
@@ -55,6 +56,23 @@ class Package:
   source: Path | None = None
   build: bool = True
   include_dependencies: bool = True
+  max_size: int | None = None
+  max_files: int | None = None
+  max_dependencies: int | None = None
+  max_dependency_size: int | None = None
+  max_dependency_files: int | None = None
+
+  def __post_init__(self) -> None:
+    if self.max_size is not None and self.max_size < 0:
+      raise ValueError("max_size must be non-negative")
+    if self.max_files is not None and self.max_files < 0:
+      raise ValueError("max_files must be non-negative")
+    if self.max_dependencies is not None and self.max_dependencies < 0:
+      raise ValueError("max_dependencies must be non-negative")
+    if self.max_dependency_size is not None and self.max_dependency_size < 0:
+      raise ValueError("max_dependency_size must be non-negative")
+    if self.max_dependency_files is not None and self.max_dependency_files < 0:
+      raise ValueError("max_dependency_files must be non-negative")
 
   def parsed_requirement(self) -> Requirement:
     try:
@@ -72,6 +90,7 @@ class PackageArtifact:
   sha256: str | None = None
   requires_python: str | None = None
   yanked: bool = False
+  size: int | None = None
 
   @property
   def is_wheel(self) -> bool:
@@ -81,7 +100,12 @@ class PackageArtifact:
 class PackageIndex(Protocol):
   def artifacts(self, project: str) -> Sequence[PackageArtifact]: ...
 
-  def download(self, artifact: PackageArtifact, destination: Path) -> Path: ...
+  def download(
+    self,
+    artifact: PackageArtifact,
+    destination: Path,
+    max_bytes: int | None,
+  ) -> Path: ...
 
 
 class PyPIIndex:
@@ -113,6 +137,7 @@ class PyPIIndex:
         continue
       hashes = item.get("hashes")
       sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
+      size = item.get("size")
       artifacts.append(
         PackageArtifact(
           name=parsed[0],
@@ -122,15 +147,22 @@ class PyPIIndex:
           sha256=sha256 if isinstance(sha256, str) else None,
           requires_python=item.get("requires-python"),
           yanked=bool(item.get("yanked", False)),
+          size=size if isinstance(size, int) and size >= 0 else None,
         )
       )
     return artifacts
 
-  def download(self, artifact: PackageArtifact, destination: Path) -> Path:
+  def download(
+    self,
+    artifact: PackageArtifact,
+    destination: Path,
+    max_bytes: int | None,
+  ) -> Path:
+    ensure_size(artifact.size, max_bytes, artifact.filename)
     path = destination / artifact.filename
     try:
       with urllib.request.urlopen(artifact.url) as response, path.open("wb") as output:
-        shutil.copyfileobj(response, output)
+        copy_limited(response, output, max_bytes, artifact.filename)
     except (OSError, urllib.error.HTTPError) as error:
       raise PackageError(f"failed to download {artifact.filename}: {error}") from error
     if artifact.sha256 is not None and file_sha256(path) != artifact.sha256:
@@ -174,11 +206,20 @@ class PackageCache:
     self.root = root
     self._locks: dict[tuple[str, Version], asyncio.Lock] = {}
 
-  async def add(self, distribution: Path, *, build: bool = True) -> CachedPackage:
+  async def add(
+    self,
+    distribution: Path,
+    *,
+    build: bool = True,
+    max_size: int | None = None,
+    max_files: int | None = None,
+  ) -> CachedPackage:
     return await self.install(
       Path(distribution),
       build=build,
       policy="by_version",
+      max_size=max_size,
+      max_files=max_files,
     )
 
   async def resolve(self, name: str, version: str | Version) -> CachedPackage | None:
@@ -204,18 +245,49 @@ class PackageCache:
     build: bool,
     policy: CachePolicy,
     temporary_root: Path | None = None,
+    max_size: int | None = None,
+    max_files: int | None = None,
   ) -> CachedPackage:
-    wheel = await asyncio.to_thread(prepare_wheel, Path(distribution), build)
-    name, version, _, _ = parse_wheel_filename(wheel.name)
-    key = (canonicalize_name(name), version)
-    lock = self._locks.setdefault(key, asyncio.Lock())
-    async with lock:
-      root = self.root if policy == "by_version" else temporary_root
-      if root is None:
-        raise PackageError("temporary package root is missing")
-      return await asyncio.to_thread(self._add_wheel, wheel, root)
+    distribution = Path(distribution)
+    build_directory = (
+      tempfile.TemporaryDirectory(prefix="pysandbox-package-build-")
+      if distribution.is_dir()
+      else None
+    )
+    try:
+      wheel = await asyncio.to_thread(
+        prepare_wheel,
+        distribution,
+        build,
+        Path(build_directory.name) if build_directory is not None else None,
+        max_size,
+        max_files,
+      )
+      name, version, _, _ = parse_wheel_filename(wheel.name)
+      key = (canonicalize_name(name), version)
+      lock = self._locks.setdefault(key, asyncio.Lock())
+      async with lock:
+        root = self.root if policy == "by_version" else temporary_root
+        if root is None:
+          raise PackageError("temporary package root is missing")
+        return await asyncio.to_thread(
+          self._add_wheel,
+          wheel,
+          root,
+          max_size,
+          max_files,
+        )
+    finally:
+      if build_directory is not None:
+        build_directory.cleanup()
 
-  def _add_wheel(self, wheel: Path, root: Path) -> CachedPackage:
+  def _add_wheel(
+    self,
+    wheel: Path,
+    root: Path,
+    max_size: int | None,
+    max_files: int | None,
+  ) -> CachedPackage:
     ensure_compatible_wheel(wheel)
     parsed_name, version, _, _ = parse_wheel_filename(wheel.name)
     name = canonicalize_name(parsed_name)
@@ -234,7 +306,7 @@ class PackageCache:
     try:
       site_packages = staging / "site-packages"
       site_packages.mkdir()
-      install_wheel(wheel, site_packages)
+      install_wheel(wheel, site_packages, max_size, max_files)
       paths = tuple(sorted(site_packages.iterdir(), key=lambda path: path.name))
       manifest = {
         "name": name,
@@ -310,6 +382,11 @@ class _PackageRequirement:
   requirement: Requirement
   build: bool
   include_dependencies: bool
+  max_size: int | None
+  max_files: int | None
+  max_dependencies: int | None
+  max_dependency_size: int | None
+  max_dependency_files: int | None
 
 
 @dataclass(slots=True)
@@ -335,6 +412,7 @@ class _Candidate:
 
   def prepare(self) -> None:
     if self.wheel is None and self.cached is None:
+      ensure_size(self.artifact.size, self.package.max_size, self.artifact.filename)
       cached = (
         self.manager.cache._resolve(
           self.name,
@@ -352,19 +430,33 @@ class _Candidate:
         distribution = self.distribution or self.manager.index.download(
           self.artifact,
           self.download_directory,
+          self.package.max_size,
         )
-        self.wheel = prepare_wheel(distribution, self.package.build)
+        self.wheel = prepare_wheel(
+          distribution,
+          self.package.build,
+          self.download_directory,
+          self.package.max_size,
+          self.package.max_files,
+        )
     if self.dependencies is not None:
       return
     metadata = (
       cached_package_metadata(self.cached)
       if self.cached is not None
-      else wheel_metadata(self.wheel_required())
+      else wheel_metadata(
+        self.wheel_required(),
+        self.package.max_size,
+        self.package.max_files,
+      )
     )
     self.dependencies = dependencies_from_metadata(
       metadata,
       build=self.package.build,
       extras=self.extras,
+      max_dependencies=self.package.max_dependencies,
+      max_dependency_size=self.package.max_dependency_size,
+      max_dependency_files=self.package.max_dependency_files,
     )
 
   def wheel_required(self) -> Path:
@@ -391,6 +483,13 @@ class _Provider(AbstractProvider[_PackageRequirement, _Candidate, str]):
     self.download_directory = download_directory
     self.allow_cached = allow_cached
     self._candidates: dict[str, list[_Candidate]] = {}
+    self._dependency_identifiers: set[str] = set()
+    limits = [
+      package.max_dependencies
+      for package in packages
+      if package.max_dependencies is not None
+    ]
+    self.max_dependencies = sum(limits) if len(limits) == len(packages) else None
 
   def identify(self, requirement_or_candidate: _PackageRequirement | _Candidate) -> str:
     if isinstance(requirement_or_candidate, _Candidate):
@@ -413,6 +512,15 @@ class _Provider(AbstractProvider[_PackageRequirement, _Candidate, str]):
     requirements: Mapping[str, Iterator[_PackageRequirement]],
     incompatibilities: Mapping[str, Iterator[_Candidate]],
   ) -> Iterable[_Candidate]:
+    if identifier not in self.packages:
+      self._dependency_identifiers.add(identifier)
+      if (
+        self.max_dependencies is not None
+        and len(self._dependency_identifiers) > self.max_dependencies
+      ):
+        raise PackageError(
+          f"package resolution exceeds the {self.max_dependencies}-dependency limit"
+        )
     required = list(requirements[identifier])
     incompatible = {(item.name, item.version) for item in incompatibilities[identifier]}
     candidates = self._candidates.get(identifier)
@@ -423,6 +531,15 @@ class _Provider(AbstractProvider[_PackageRequirement, _Candidate, str]):
         source=root.source if root is not None else None,
         build=all(item.build for item in required),
         include_dependencies=any(item.include_dependencies for item in required),
+        max_size=minimum_limit(item.max_size for item in required),
+        max_files=minimum_limit(item.max_files for item in required),
+        max_dependencies=minimum_limit(item.max_dependencies for item in required),
+        max_dependency_size=minimum_limit(
+          item.max_dependency_size for item in required
+        ),
+        max_dependency_files=minimum_limit(
+          item.max_dependency_files for item in required
+        ),
       )
       candidates = self.manager._candidates(
         package,
@@ -442,6 +559,15 @@ class _Provider(AbstractProvider[_PackageRequirement, _Candidate, str]):
         source=candidate.package.source,
         build=all(item.build for item in required),
         include_dependencies=any(item.include_dependencies for item in required),
+        max_size=minimum_limit(item.max_size for item in required),
+        max_files=minimum_limit(item.max_files for item in required),
+        max_dependencies=minimum_limit(item.max_dependencies for item in required),
+        max_dependency_size=minimum_limit(
+          item.max_dependency_size for item in required
+        ),
+        max_dependency_files=minimum_limit(
+          item.max_dependency_files for item in required
+        ),
       )
     return [
       candidate
@@ -513,6 +639,8 @@ class PackageManager:
             build=False,
             policy=cache,
             temporary_root=temporary_layers,
+            max_size=candidate.package.max_size,
+            max_files=candidate.package.max_files,
           )
         )
       paths = compose_paths(installed)
@@ -540,6 +668,11 @@ class PackageManager:
         package.parsed_requirement(),
         build=package.build,
         include_dependencies=package.include_dependencies,
+        max_size=package.max_size,
+        max_files=package.max_files,
+        max_dependencies=package.max_dependencies,
+        max_dependency_size=package.max_dependency_size,
+        max_dependency_files=package.max_dependency_files,
       )
       for package in packages
     ]
@@ -557,20 +690,26 @@ class PackageManager:
     allow_cached: bool,
   ) -> list[_Candidate]:
     requirement = package.parsed_requirement()
-    if package.source is not None:
-      parsed = distribution_from_filename(package.source.name)
+    distribution = package.source
+    candidate_allow_cached = allow_cached
+    if distribution is not None:
+      is_directory = distribution.is_dir()
+      filename = f"{distribution.name}.tar.gz" if is_directory else distribution.name
+      parsed = distribution_from_filename(filename)
       if parsed is None:
-        raise PackageError(f"unsupported distribution filename: {package.source.name}")
+        raise PackageError(f"unsupported distribution filename: {filename}")
       artifact = PackageArtifact(
         name=parsed[0],
         version=parsed[1],
-        filename=package.source.name,
-        url=package.source.as_uri(),
-        sha256=file_sha256(package.source),
+        filename=filename,
+        url=distribution.as_uri(),
+        sha256=None if is_directory else file_sha256(distribution),
+        size=None if is_directory else distribution.stat().st_size,
       )
       if artifact.name != canonicalize_name(requirement.name):
-        raise PackageError(f"{package.source.name} does not provide {requirement.name}")
+        raise PackageError(f"{filename} does not provide {requirement.name}")
       artifacts = (artifact,)
+      candidate_allow_cached = allow_cached and not is_directory
     else:
       artifacts = self.index.artifacts(requirement.name)
     candidates = [
@@ -579,13 +718,14 @@ class PackageManager:
         package=package,
         manager=self,
         download_directory=download_directory,
-        distribution=package.source,
-        allow_cached=allow_cached,
+        distribution=distribution,
+        allow_cached=candidate_allow_cached,
       )
       for artifact in artifacts
       if not artifact.yanked
       and artifact.version in requirement.specifier
       and artifact_matches_python(artifact)
+      and size_within_limit(artifact.size, package.max_size)
       and (package.build or artifact.is_wheel)
       and (not artifact.is_wheel or compatible_wheel_filename(artifact.filename))
     ]
@@ -596,15 +736,27 @@ class PackageManager:
     return candidates
 
 
-def prepare_wheel(distribution: Path, build: bool) -> Path:
+def prepare_wheel(
+  distribution: Path,
+  build: bool,
+  output_directory: Path | None = None,
+  max_size: int | None = None,
+  max_files: int | None = None,
+) -> Path:
   if distribution.name.endswith(".whl"):
     ensure_compatible_wheel(distribution)
+    validate_zip_file(distribution, max_size, max_files)
     return distribution
   if not build:
     raise PackageError(f"building is disabled for {distribution.name}")
   with tempfile.TemporaryDirectory(prefix="pysandbox-build-") as directory:
     source = Path(directory) / "source"
-    unpack_distribution(distribution, source)
+    if distribution.is_dir():
+      validate_directory(distribution, max_size, max_files)
+      shutil.copytree(distribution, source)
+    else:
+      ensure_file_size(distribution, max_size)
+      unpack_distribution(distribution, source, max_size, max_files)
     output = Path(directory) / "wheel"
     output.mkdir()
     with DefaultIsolatedEnv() as environment:
@@ -612,9 +764,11 @@ def prepare_wheel(distribution: Path, build: bool) -> Path:
       environment.install(builder.build_system_requires)
       environment.install(builder.get_requires_for_build("wheel"))
       wheel = Path(builder.build("wheel", output))
-    target = distribution.parent / wheel.name
+    target = (output_directory or distribution.parent) / wheel.name
+    target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(wheel, target)
   ensure_compatible_wheel(target)
+  validate_zip_file(target, max_size, max_files)
   return target
 
 
@@ -626,21 +780,34 @@ def normalize_package(package: Package | str) -> Package:
     source=package.source.resolve() if package.source is not None else None,
     build=package.build,
     include_dependencies=package.include_dependencies,
+    max_size=package.max_size,
+    max_files=package.max_files,
+    max_dependencies=package.max_dependencies,
+    max_dependency_size=package.max_dependency_size,
+    max_dependency_files=package.max_dependency_files,
   )
 
 
-def unpack_distribution(distribution: Path, destination: Path) -> None:
+def unpack_distribution(
+  distribution: Path,
+  destination: Path,
+  max_size: int | None = None,
+  max_files: int | None = None,
+) -> None:
   archive_root = destination.parent / "archive"
   archive_root.mkdir()
   if distribution.name.endswith((".tar.gz", ".tar.bz2", ".tar.xz", ".tar")):
     with tarfile.open(distribution) as archive:
+      validate_archive_members(
+        ((member.size, member.isfile()) for member in archive.getmembers()),
+        max_size,
+        max_files,
+        distribution.name,
+      )
       archive.extractall(archive_root, filter="data")
   elif distribution.name.endswith(".zip"):
     with zipfile.ZipFile(distribution) as archive:
-      for member in archive.infolist():
-        path = Path(member.filename)
-        if path.is_absolute() or ".." in path.parts:
-          raise PackageError(f"unsafe path in source distribution: {member.filename}")
+      validate_zip_archive(archive, max_size, max_files, distribution.name)
       archive.extractall(archive_root)
   else:
     raise PackageError(f"unsupported source distribution: {distribution.name}")
@@ -653,7 +820,13 @@ def unpack_distribution(distribution: Path, destination: Path) -> None:
     entry.replace(destination / entry.name)
 
 
-def install_wheel(wheel: Path, site_packages: Path) -> None:
+def install_wheel(
+  wheel: Path,
+  site_packages: Path,
+  max_size: int | None = None,
+  max_files: int | None = None,
+) -> None:
+  validate_zip_file(wheel, max_size, max_files)
   schemes = {
     "purelib": str(site_packages),
     "platlib": str(site_packages),
@@ -667,16 +840,25 @@ def install_wheel(wheel: Path, site_packages: Path) -> None:
     script_kind="posix",
     bytecode_optimization_levels=(),
   )
-  with WheelFile.open(wheel) as source:
-    install(
-      source=source,
-      destination=destination,
-      additional_metadata={"INSTALLER": b"pysandbox"},
-    )
+  try:
+    with WheelFile.open(wheel) as source:
+      source.validate_record()
+      install(
+        source=source,
+        destination=destination,
+        additional_metadata={"INSTALLER": b"pysandbox"},
+      )
+  except ValueError as error:
+    raise PackageError(f"invalid wheel {wheel.name}: {error}") from error
 
 
-def wheel_metadata(wheel: Path):
+def wheel_metadata(
+  wheel: Path,
+  max_size: int | None = None,
+  max_files: int | None = None,
+):
   with zipfile.ZipFile(wheel) as archive:
+    validate_zip_archive(archive, max_size, max_files, wheel.name)
     names = [
       name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
     ]
@@ -701,12 +883,20 @@ def dependencies_from_metadata(
   *,
   build: bool,
   extras: frozenset[str],
+  max_dependencies: int | None,
+  max_dependency_size: int | None,
+  max_dependency_files: int | None,
 ) -> tuple[_PackageRequirement, ...]:
   return tuple(
     _PackageRequirement(
       Requirement(value),
       build=build,
       include_dependencies=True,
+      max_size=max_dependency_size,
+      max_files=max_dependency_files,
+      max_dependencies=max_dependencies,
+      max_dependency_size=max_dependency_size,
+      max_dependency_files=max_dependency_files,
     )
     for value in metadata.get_all("Requires-Dist", ())
     if requirement_applies(value, extras)
@@ -775,6 +965,121 @@ def compose_paths(packages: Sequence[CachedPackage]) -> tuple[Path, ...]:
         )
       paths[path.name] = path
   return tuple(paths[name] for name in sorted(paths))
+
+
+def minimum_limit(limits: Iterable[int | None]) -> int | None:
+  bounded = [limit for limit in limits if limit is not None]
+  return min(bounded) if bounded else None
+
+
+def size_within_limit(size: int | None, max_bytes: int | None) -> bool:
+  return size is None or max_bytes is None or size <= max_bytes
+
+
+def ensure_size(size: int | None, max_bytes: int | None, name: str) -> None:
+  if not size_within_limit(size, max_bytes):
+    raise PackageError(f"{name} exceeds the {max_bytes}-byte size limit")
+
+
+def ensure_file_size(path: Path, max_bytes: int | None) -> None:
+  ensure_size(path.stat().st_size, max_bytes, path.name)
+
+
+def copy_limited(
+  source: BinaryIO,
+  destination: BinaryIO,
+  max_bytes: int | None,
+  name: str,
+) -> None:
+  if max_bytes is None:
+    shutil.copyfileobj(source, destination)
+    return
+  copied = 0
+  while chunk := source.read(min(1024 * 1024, max_bytes - copied + 1)):
+    copied += len(chunk)
+    if copied > max_bytes:
+      raise PackageError(f"{name} exceeds the {max_bytes}-byte size limit")
+    destination.write(chunk)
+
+
+def validate_archive_members(
+  members: Iterable[tuple[int, bool]],
+  max_bytes: int | None,
+  max_files: int | None,
+  name: str,
+) -> None:
+  if max_bytes is None and max_files is None:
+    return
+  size = 0
+  files = 0
+  for member_size, is_file in members:
+    if not is_file:
+      continue
+    size += member_size
+    files += 1
+    ensure_size(size, max_bytes, name)
+    if max_files is not None and files > max_files:
+      raise PackageError(f"{name} exceeds the {max_files}-file limit")
+
+
+def validate_zip_archive(
+  archive: zipfile.ZipFile,
+  max_bytes: int | None,
+  max_files: int | None,
+  name: str,
+) -> None:
+  validate_archive_members(
+    ((member.file_size, not member.is_dir()) for member in archive.infolist()),
+    max_bytes,
+    max_files,
+    name,
+  )
+
+
+def validate_zip_file(
+  path: Path,
+  max_bytes: int | None,
+  max_files: int | None,
+) -> None:
+  if max_bytes is None and max_files is None:
+    return
+  ensure_file_size(path, max_bytes)
+  with zipfile.ZipFile(path) as archive:
+    validate_zip_archive(archive, max_bytes, max_files, path.name)
+
+
+def validate_directory(
+  path: Path,
+  max_bytes: int | None,
+  max_files: int | None,
+) -> None:
+  if max_bytes is None and max_files is None:
+    return
+  size = 0
+  files = 0
+
+  def visit(directory: Path, ancestors: frozenset[tuple[int, int]]) -> None:
+    nonlocal size, files
+    metadata = directory.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    if identity in ancestors:
+      raise PackageError(
+        f"directory source contains a symbolic-link cycle: {directory}"
+      )
+    descendants = ancestors | {identity}
+    with os.scandir(directory) as entries:
+      for entry in entries:
+        if entry.is_dir(follow_symlinks=True):
+          visit(Path(entry.path), descendants)
+          continue
+        metadata = entry.stat(follow_symlinks=True)
+        size += metadata.st_size
+        files += 1
+        ensure_size(size, max_bytes, path.name)
+        if max_files is not None and files > max_files:
+          raise PackageError(f"{path.name} exceeds the {max_files}-file limit")
+
+  visit(path, frozenset())
 
 
 def file_sha256(path: Path) -> str:
