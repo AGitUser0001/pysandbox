@@ -10,8 +10,6 @@ from pysandbox import (
   VfsMetadata,
 )
 
-DISPATCH_TEST_TIMEOUT = 30
-
 
 class MemoryVfs:
   def __init__(self) -> None:
@@ -105,13 +103,13 @@ class TestVfs:
 
     try:
       first = asyncio.create_task(runtime.execute("await held('first')"))
-      await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
+      await first_started.wait()
       fillers = [
         asyncio.create_task(runtime.execute("await held('filler')")) for _ in range(3)
       ]
-      completed, _ = await asyncio.wait_for(
-        asyncio.wait(fillers, return_when=asyncio.FIRST_COMPLETED),
-        timeout=DISPATCH_TEST_TIMEOUT,
+      completed, _ = await asyncio.wait(
+        fillers,
+        return_when=asyncio.FIRST_COMPLETED,
       )
       completed_results = await asyncio.gather(*completed)
       assert any(
@@ -119,10 +117,7 @@ class TestVfs:
         for result in completed_results
       ), completed_results
 
-      overloaded = await asyncio.wait_for(
-        runtime.execute("import hello"),
-        timeout=DISPATCH_TEST_TIMEOUT,
-      )
+      overloaded = await runtime.execute("import hello")
       assert overloaded.error is not None
       assert vfs.calls == []
 

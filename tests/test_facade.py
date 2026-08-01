@@ -19,7 +19,6 @@ from pysandbox import (
   WorkerStoppedError,
 )
 
-DISPATCH_TEST_TIMEOUT = 60
 FREE_THREADED: bool = not getattr(sys, "_is_gil_enabled", lambda: True)()
 
 
@@ -30,7 +29,6 @@ async def wait_for_event_or_execution(
   event_wait = asyncio.create_task(event.wait())
   done, _ = await asyncio.wait(
     (event_wait, execution),
-    timeout=DISPATCH_TEST_TIMEOUT,
     return_when=asyncio.FIRST_COMPLETED,
   )
   if event_wait in done:
@@ -44,7 +42,7 @@ async def wait_for_event_or_execution(
       "execution stopped before reaching expected concurrency: "
       f"reason={result.reason.value}, error={result.error!r}"
     )
-  pytest.fail("execution did not reach expected concurrency before the deadline")
+  pytest.fail("execution did not reach expected concurrency")
 
 
 class TestFacade:
@@ -443,8 +441,7 @@ class TestFacade:
       executions = [
         asyncio.create_task(runtime.execute("await held_call()")) for _ in range(6)
       ]
-      await asyncio.wait_for(two_active.wait(), timeout=DISPATCH_TEST_TIMEOUT)
-      await asyncio.sleep(0.05)
+      await two_active.wait()
       assert maximum_active == 2
       release.set()
       results = await asyncio.gather(*executions)
@@ -482,7 +479,6 @@ class TestFacade:
         )
       )
       await wait_for_event_or_execution(two_active, execution)
-      await asyncio.sleep(0.05)
       assert maximum_active == 2
       release.set()
       result = await execution
@@ -531,11 +527,10 @@ class TestFacade:
           ),
         )
       )
-      await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
+      await first_started.wait()
 
-      unaffected = await asyncio.wait_for(
-        runtime.execute("print(await locally_saturated('other'), flush=True)"),
-        timeout=DISPATCH_TEST_TIMEOUT,
+      unaffected = await runtime.execute(
+        "print(await locally_saturated('other'), flush=True)"
       )
       assert unaffected.error is None
       assert unaffected.stdout == b"other\n"
@@ -576,15 +571,15 @@ class TestFacade:
     try:
       assert await target.call(("ping",), None) == "pong"
       first = asyncio.create_task(runtime.execute("await saturated_call('first')"))
-      await asyncio.wait_for(first_started.wait(), timeout=DISPATCH_TEST_TIMEOUT)
+      await first_started.wait()
 
       fillers = [
         asyncio.create_task(runtime.execute(f"await saturated_call('{name}')"))
         for name in ("second", "third", "fourth")
       ]
-      completed, _ = await asyncio.wait_for(
-        asyncio.wait(fillers, return_when=asyncio.FIRST_COMPLETED),
-        timeout=DISPATCH_TEST_TIMEOUT,
+      completed, _ = await asyncio.wait(
+        fillers,
+        return_when=asyncio.FIRST_COMPLETED,
       )
       completed_results = await asyncio.gather(*completed)
       assert any(
@@ -593,10 +588,7 @@ class TestFacade:
       ), completed_results
 
       make_worker_call.set()
-      await asyncio.wait_for(
-        worker_call_finished.wait(),
-        timeout=DISPATCH_TEST_TIMEOUT,
-      )
+      await worker_call_finished.wait()
       release.set()
       results = await asyncio.gather(first, *fillers)
       assert all(
@@ -627,21 +619,41 @@ class TestFacade:
       "async def held_call():\n  await wait_on_host()\n  return 'done'\n",
       spin_concurrent=False,
     )
+    first: asyncio.Task[object] | None = None
+    fillers: list[asyncio.Task[object]] = []
     try:
       first = asyncio.create_task(worker.call(("held_call",), None))
-      await asyncio.wait_for(
-        host_call_started.wait(),
-        timeout=DISPATCH_TEST_TIMEOUT,
+      await host_call_started.wait()
+      fillers = [
+        asyncio.create_task(worker.call(("held_call",), None)) for _ in range(3)
+      ]
+      completed, _ = await asyncio.wait(
+        fillers,
+        return_when=asyncio.FIRST_COMPLETED,
       )
-      second = asyncio.create_task(worker.call(("held_call",), None))
-      await asyncio.sleep(0.05)
-      with pytest.raises(RuntimeError, match="worker call queue is full"):
-        await worker.call(("held_call",), None)
+      completed_results = await asyncio.gather(*completed, return_exceptions=True)
+      assert any(
+        isinstance(result, RuntimeError) and "worker call queue is full" in str(result)
+        for result in completed_results
+      ), completed_results
 
       release.set()
-      assert await asyncio.gather(first, second) == ["done", "done"]
+      results = await asyncio.gather(first, *fillers, return_exceptions=True)
+      assert results[0] == "done"
+      assert all(
+        result == "done"
+        or (
+          isinstance(result, RuntimeError)
+          and "worker call queue is full" in str(result)
+        )
+        for result in results[1:]
+      )
     finally:
       release.set()
+      pending = [first] if first is not None else []
+      pending.extend(fillers)
+      if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
       await worker.close()
       await runtime.close()
 

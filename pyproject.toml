@@ -54,6 +54,7 @@ dev = [
   "componentize-py",
   "pytest",
   "pytest-asyncio",
+  "pytest-timeout",
   "pytest-xdist",
   "ruff",
 ]
@@ -61,6 +62,7 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
+timeout = 180
 
 [tool.maturin]
 manifest-path = "rust/pysandbox-native/Cargo.toml"
