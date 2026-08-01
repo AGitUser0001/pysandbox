@@ -86,13 +86,15 @@ jobs:
 
   linux:
     needs: runtime
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64
-          - aarch64
+        platform:
+          - runner: ubuntu-22.04
+            target: x86_64
+          - runner: ubuntu-22.04-arm
+            target: aarch64
     steps:
       - uses: actions/checkout@v6
         with:
@@ -107,7 +109,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: ${{ matrix.platform.target }}
           args: >-
             --release
             --out dist
@@ -124,25 +126,20 @@ jobs:
           manylinux: "2_28"
           docker-options: -e PYSANDBOX_PREBUILT_RUNTIME=.pysandbox-runtime
       - name: Install wheel
-        if: ${{ matrix.target == 'x86_64' }}
         run: python -m pip install --pre --find-links dist pysandbox
       - name: Test installed wheel
-        if: ${{ matrix.target == 'x86_64' }}
         working-directory: tests
         run: python -m unittest discover -v
       - name: Set up free-threaded Python
-        if: ${{ matrix.target == 'x86_64' }}
         id: python314t
         uses: actions/setup-python@v6
         with:
           python-version: "3.14t"
       - name: Install free-threaded wheel
-        if: ${{ matrix.target == 'x86_64' }}
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
           -m pip install --pre --find-links dist pysandbox
       - name: Test free-threaded wheel
-        if: ${{ matrix.target == 'x86_64' }}
         working-directory: tests
         run: >-
           '${{ steps.python314t.outputs.python-path }}'
@@ -153,18 +150,22 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-linux-${{ matrix.target }}
+          name: wheels-linux-${{ matrix.platform.target }}
           path: dist
 
   windows:
     needs: runtime
-    runs-on: windows-latest
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x64
-          - aarch64
+        platform:
+          - runner: windows-latest
+            target: x64
+            architecture: x64
+          - runner: windows-11-arm
+            target: aarch64
+            architecture: arm64
     steps:
       - uses: actions/checkout@v6
         with:
@@ -173,33 +174,33 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          architecture: x64
+          architecture: ${{ matrix.platform.architecture }}
       - id: python313
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-          architecture: x64
+          architecture: ${{ matrix.platform.architecture }}
       - id: python314
         uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-          architecture: x64
+          architecture: ${{ matrix.platform.architecture }}
       - id: python314t
         uses: actions/setup-python@v6
         with:
           python-version: "3.14t"
-          architecture: x64
+          architecture: ${{ matrix.platform.architecture }}
       - id: python315
         uses: actions/setup-python@v6
         with:
           python-version: "3.15"
-          architecture: x64
+          architecture: ${{ matrix.platform.architecture }}
           allow-prereleases: true
       - id: python315t
         uses: actions/setup-python@v6
         with:
           python-version: "3.15t"
-          architecture: x64
+          architecture: ${{ matrix.platform.architecture }}
           allow-prereleases: true
       - uses: actions/download-artifact@v7
         with:
@@ -210,7 +211,7 @@ jobs:
         env:
           PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
         with:
-          target: ${{ matrix.target }}
+          target: ${{ matrix.platform.target }}
           args: >-
             --release
             --out dist
@@ -225,23 +226,19 @@ jobs:
             --manifest-path rust/pysandbox-native/Cargo.toml
           sccache: true
       - name: Install wheel
-        if: ${{ matrix.target == 'x64' }}
         run: >-
           & '${{ steps.python312.outputs.python-path }}'
           -m pip install --pre --find-links dist pysandbox
       - name: Test installed wheel
-        if: ${{ matrix.target == 'x64' }}
         working-directory: tests
         run: >-
           & '${{ steps.python312.outputs.python-path }}'
           -m unittest discover -v
       - name: Install free-threaded wheel
-        if: ${{ matrix.target == 'x64' }}
         run: >-
           & '${{ steps.python314t.outputs.python-path }}'
           -m pip install --pre --find-links dist pysandbox
       - name: Test free-threaded wheel
-        if: ${{ matrix.target == 'x64' }}
         working-directory: tests
         run: |
           & '${{ steps.python314t.outputs.python-path }}' -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
@@ -249,7 +246,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-windows-${{ matrix.target }}
+          name: wheels-windows-${{ matrix.platform.target }}
           path: dist
 
   macos:
