@@ -9,6 +9,17 @@
 
 An asynchronous Wasmtime-backed Python sandbox with two-way RPC.
 
+## Installation
+
+Install a prebuilt wheel from PyPI:
+
+```sh
+pip install pysandbox-wasi
+```
+
+For source builds, including builds that reuse the platform-independent
+component-runtime artifact, see [Building](CONTRIBUTING.md#building).
+
 ## Demo
 
 ```sh
@@ -262,16 +273,11 @@ environment; call `environment.close()` when it is no longer in use.
 
 ## Internals
 
-- A PyO3 extension supervises a Rust sandbox subprocess without blocking the
-  application's asyncio loop.
-- The subprocess shares a Wasmtime engine and compiled component. Each worker
-  owns an isolated Store and component instance.
-- Guest Python uses a componentized CPython runtime and supports top-level
-  `await`.
-- A persistent framed local socket carries lifecycle commands, output, limit
-  updates, cancellation, bidirectional RPC, and VFS requests.
-- WASI routes `/python` to a physical read-only mount and all other paths to
-  the host VFS. Componentized Python is configured not to write bytecode.
-- The packaged component and runtime modules are built with the wheel.
-- Closing a one-shot execution or worker destroys its Store. Closing the
-  runtime shuts down the shared sandbox subprocess.
+A PyO3 extension supervises a shared Rust sandbox subprocess without blocking
+the application's asyncio loop. The subprocess shares its Wasmtime engine and
+compiled component while giving every worker an isolated Store, component
+instance, CPython state, memory, capabilities, limits, and output stream.
+
+See [DOCS.md](DOCS.md) for the complete architecture and
+[CONTRIBUTING.md](CONTRIBUTING.md) for development, testing, and build
+instructions.
