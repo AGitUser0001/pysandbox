@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
@@ -12,7 +13,7 @@ use bytes::Bytes;
 use eryx_vfs::{HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir, add_hybrid_vfs_to_linker};
 use pysandbox_protocol::{Frame, FrameKind, FuelOperation, RpcCall, encode_payload};
 use tokio::io::AsyncWrite;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{
     AsContextMut, Config, Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits,
@@ -277,13 +278,67 @@ enum PendingStoreUpdate {
 }
 
 #[derive(Debug, Default)]
+struct MonotonicDeadline {
+    deadline: Mutex<Option<Instant>>,
+    changed: Notify,
+}
+
+impl MonotonicDeadline {
+    fn replace(&self, timeout: Option<Duration>) {
+        *self.deadline.lock().expect("worker deadline lock poisoned") =
+            timeout.map(|duration| Instant::now() + duration);
+        self.changed.notify_one();
+    }
+
+    fn is_elapsed(&self) -> bool {
+        self.deadline
+            .lock()
+            .expect("worker deadline lock poisoned")
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            let deadline = *self.deadline.lock().expect("worker deadline lock poisoned");
+            match deadline {
+                Some(deadline) if Instant::now() >= deadline => return,
+                Some(deadline) => {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(deadline.into()) => return,
+                        () = &mut changed => {}
+                    }
+                }
+                None => changed.await,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 struct ExecutionControlState {
     active_execution: AtomicU64,
     cancelled: AtomicBool,
     closed: AtomicBool,
     pending_cancellations: Mutex<HashSet<u64>>,
-    timeout_deadline: Mutex<Option<Instant>>,
+    timeout_deadline: MonotonicDeadline,
+    interrupted: Notify,
     pending: Mutex<Vec<PendingStoreUpdate>>,
+}
+
+async fn wait_for_interruption(state: Arc<ExecutionControlState>) {
+    loop {
+        let interrupted = state.interrupted.notified();
+        tokio::pin!(interrupted);
+        if state.cancelled.load(Ordering::Acquire) || state.closed.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::select! {
+            () = state.timeout_deadline.wait() => return,
+            () = &mut interrupted => {}
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -319,6 +374,7 @@ impl WorkerControl {
     pub fn cancel(&self, execution_id: u64) -> Result<()> {
         if self.state.active_execution.load(Ordering::Acquire) == execution_id {
             self.state.cancelled.store(true, Ordering::Release);
+            self.state.interrupted.notify_one();
         } else {
             self.state
                 .pending_cancellations
@@ -399,11 +455,7 @@ impl WorkerControl {
             updates.push(receiver);
         }
         if let Some(timeout) = timeout {
-            *self
-                .state
-                .timeout_deadline
-                .lock()
-                .expect("worker deadline lock poisoned") = Some(Instant::now() + timeout);
+            self.state.timeout_deadline.replace(Some(timeout));
         }
         if !updates.is_empty() {
             self.send(ControlMessage::ApplyUpdates)?;
@@ -416,6 +468,7 @@ impl WorkerControl {
 
     pub fn close(&self) -> Result<()> {
         self.state.closed.store(true, Ordering::Release);
+        self.state.interrupted.notify_one();
         self.send(ControlMessage::Close)
     }
 
@@ -424,11 +477,7 @@ impl WorkerControl {
     }
 
     pub fn timed_out(&self) -> bool {
-        self.state
-            .timeout_deadline
-            .lock()
-            .expect("worker deadline lock poisoned")
-            .is_some_and(|deadline| Instant::now() >= deadline)
+        self.state.timeout_deadline.is_elapsed()
     }
 
     pub(crate) fn worker_call(
@@ -469,12 +518,7 @@ impl WorkerControl {
             &self.state,
             "execution ended before applying its control update",
         );
-        *self
-            .state
-            .timeout_deadline
-            .lock()
-            .expect("worker deadline lock poisoned") =
-            timeout.map(|duration| Instant::now() + duration);
+        self.state.timeout_deadline.replace(timeout);
         self.state
             .active_execution
             .store(execution_id, Ordering::Release);
@@ -1006,21 +1050,6 @@ impl ComponentWorker {
         let control_state = control.state.clone();
         let epoch_cpu_share = cpu_share.clone();
         store.epoch_deadline_callback(move |mut store| {
-            if control_state.cancelled.load(Ordering::Acquire) {
-                return Ok(UpdateDeadline::Interrupt);
-            }
-            if control_state.closed.load(Ordering::Acquire) {
-                return Ok(UpdateDeadline::Interrupt);
-            }
-            if control_state
-                .timeout_deadline
-                .lock()
-                .expect("worker deadline lock poisoned")
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                return Ok(UpdateDeadline::Interrupt);
-            }
-
             let updated = apply_pending_store_updates(store.as_context_mut(), &control_state);
             if let Ok(fuel) = store.get_fuel() {
                 epoch_cpu_share.observe_fuel(fuel);
@@ -1068,6 +1097,7 @@ impl ComponentWorker {
         limits: ExecutionLimits,
         rpc_methods: Vec<String>,
         output_sender: mpsc::UnboundedSender<OutputEvent>,
+        started: impl Future<Output = Result<()>>,
     ) -> Result<std::result::Result<(), String>> {
         self.control.begin(execution_id, limits.timeout);
         self.store.data_mut().program = program;
@@ -1077,12 +1107,22 @@ impl ComponentWorker {
             self.control.finish(execution_id);
             return Err(error);
         }
+        if let Err(error) = started.await {
+            self.output.finish();
+            self.control.finish(execution_id);
+            return Err(error);
+        }
         let guest = &self.guest;
         let cpu_share = self.cpu_share.clone();
-        let result = self
+        let execution = self
             .store
-            .run_concurrent(async move |store| cpu_share.run(guest.call_run(store)).await)
-            .await;
+            .run_concurrent(async move |store| cpu_share.run(guest.call_run(store)).await);
+        let interruption = wait_for_interruption(self.control.state.clone());
+        tokio::pin!(execution, interruption);
+        let result = tokio::select! {
+            result = &mut execution => result.map_err(anyhow::Error::from),
+            () = &mut interruption => Err(anyhow!("execution interrupted")),
+        };
 
         self.cpu_share.finish();
         self.output.finish();
@@ -1178,6 +1218,7 @@ async fn run_build_program(
             },
             Vec::new(),
             output_sender,
+            std::future::ready(Ok(())),
         )
         .await?;
     Ok((result, worker.output().events()))
@@ -1296,7 +1337,10 @@ fn apply_pending_store_updates(
 
 #[cfg(test)]
 mod tests {
-    use super::{Output, OutputSource};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{MonotonicDeadline, Output, OutputSource};
     use tokio::sync::mpsc;
 
     #[test]
@@ -1331,5 +1375,24 @@ mod tests {
             output.limit_error().as_deref(),
             Some("guest output exceeded 3 bytes")
         );
+    }
+
+    #[tokio::test]
+    async fn monotonic_deadline_reschedules_a_pending_wait() {
+        let deadline = Arc::new(MonotonicDeadline::default());
+        deadline.replace(Some(Duration::from_secs(60)));
+        let waiter = tokio::spawn({
+            let deadline = deadline.clone();
+            async move { deadline.wait().await }
+        });
+
+        tokio::task::yield_now().await;
+        deadline.replace(Some(Duration::from_millis(10)));
+
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("rescheduled deadline did not wake")
+            .expect("deadline waiter failed");
+        assert!(deadline.is_elapsed());
     }
 }

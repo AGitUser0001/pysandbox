@@ -221,6 +221,7 @@ impl SandboxProcess {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let output = Arc::new(StdMutex::new(Vec::new()));
         let (result_sender, result) = watch::channel(None);
+        let (ready_sender, ready) = watch::channel(false);
         let requests = self.requests.clone();
         let timeout_ms = timeout_milliseconds(timeout)?;
         validate_guest_dispatch_limits(
@@ -249,9 +250,16 @@ impl SandboxProcess {
         .map_err(runtime_error)?;
         let task_output = output.clone();
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-            let outcome = execute_request(&requests, worker_id, request_id, payload, task_output)
-                .await
-                .map_err(|error| error.to_string());
+            let outcome = execute_request(
+                &requests,
+                worker_id,
+                request_id,
+                payload,
+                task_output,
+                ready_sender,
+            )
+            .await
+            .map_err(|error| error.to_string());
             let _ = result_sender.send(Some(outcome));
         });
 
@@ -263,6 +271,7 @@ impl SandboxProcess {
                 requests: self.requests.clone(),
                 next_request_id: self.next_request_id.clone(),
                 output,
+                ready,
                 result,
                 shutdown: self.shutdown.subscribe(),
             },
@@ -336,8 +345,16 @@ impl SandboxProcess {
             })
             .map_err(runtime_error)?;
             let output = Arc::new(StdMutex::new(Vec::new()));
-            let result =
-                execute_request(&requests, worker_id, request_id, payload, output.clone()).await?;
+            let (ready, _ready_receiver) = watch::channel(false);
+            let result = execute_request(
+                &requests,
+                worker_id,
+                request_id,
+                payload,
+                output.clone(),
+                ready,
+            )
+            .await?;
 
             Python::attach(|py| {
                 Py::new(
@@ -553,6 +570,7 @@ struct ConnectionRequest {
     expected_kind: Option<FrameKind>,
     response: oneshot::Sender<Result<Option<ConnectionResponse>, RequestError>>,
     output: Option<SharedOutput>,
+    ready: Option<watch::Sender<bool>>,
 }
 
 struct PendingRequest {
@@ -561,6 +579,7 @@ struct PendingRequest {
     expected_kind: FrameKind,
     response: oneshot::Sender<Result<Option<ConnectionResponse>, RequestError>>,
     output: SharedOutput,
+    ready: Option<watch::Sender<bool>>,
 }
 
 enum RequestError {
@@ -646,6 +665,7 @@ fn spawn_connection_actor(
                             expected_kind,
                             response,
                             output,
+                            ready,
                         } = request;
                         if frame.kind == FrameKind::Execute
                             && let Ok(request) =
@@ -679,6 +699,7 @@ fn spawn_connection_actor(
                                         expected_kind,
                                         response,
                                         output: output.unwrap_or_default(),
+                                        ready,
                                     },
                                 );
                             }
@@ -742,6 +763,16 @@ fn spawn_connection_actor(
                                         .response
                                         .send(Err(RequestError::Runtime(error.to_string())));
                                 }
+                            }
+                            continue;
+                        }
+
+                        if frame.kind == FrameKind::ExecuteStarted {
+                            if let Some(request) = pending.get_mut(&frame.request_id)
+                                && request.request_kind == FrameKind::Execute
+                                && let Some(ready) = request.ready.take()
+                            {
+                                ready.send_replace(true);
                             }
                             continue;
                         }
@@ -1206,6 +1237,16 @@ async fn request_with_output(
     expected_kind: Option<FrameKind>,
     output: Option<SharedOutput>,
 ) -> PyResult<Option<ConnectionResponse>> {
+    request_with_output_and_ready(requests, frame, expected_kind, output, None).await
+}
+
+async fn request_with_output_and_ready(
+    requests: &mpsc::Sender<ConnectionRequest>,
+    frame: Frame,
+    expected_kind: Option<FrameKind>,
+    output: Option<SharedOutput>,
+    ready: Option<watch::Sender<bool>>,
+) -> PyResult<Option<ConnectionResponse>> {
     let (response, receiver) = oneshot::channel();
     requests
         .send(ConnectionRequest {
@@ -1213,6 +1254,7 @@ async fn request_with_output(
             expected_kind,
             response,
             output,
+            ready,
         })
         .await
         .map_err(|_| PyRuntimeError::new_err("sandbox connection is closed"))?;
@@ -1259,12 +1301,14 @@ async fn execute_request(
     request_id: u64,
     payload: Vec<u8>,
     output: SharedOutput,
+    ready: watch::Sender<bool>,
 ) -> PyResult<pysandbox_protocol::ExecuteResult> {
-    let response = request_with_output(
+    let response = request_with_output_and_ready(
         requests,
         Frame::new(FrameKind::Execute, worker_id, request_id, payload),
         Some(FrameKind::ExecuteResult),
         Some(output),
+        Some(ready),
     )
     .await?
     .ok_or_else(|| PyRuntimeError::new_err("execution returned no response"))?;
@@ -1296,6 +1340,7 @@ struct NativeExecution {
     requests: mpsc::Sender<ConnectionRequest>,
     next_request_id: Arc<AtomicU64>,
     output: SharedOutput,
+    ready: watch::Receiver<bool>,
     result: watch::Receiver<Option<Result<pysandbox_protocol::ExecuteResult, String>>>,
     shutdown: watch::Receiver<bool>,
 }
@@ -1400,8 +1445,12 @@ impl NativeExecution {
         let requests = self.requests.clone();
         let worker_id = self.worker_id;
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let ready = self.ready.clone();
+        let result = self.result.clone();
+        let shutdown = self.shutdown.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            wait_until_execution_ready(ready, result, shutdown).await?;
             let response = request(
                 &requests,
                 Frame::new(FrameKind::WorkerCall, worker_id, request_id, payload),
@@ -1505,7 +1554,11 @@ impl NativeExecution {
         let requests = self.requests.clone();
         let worker_id = self.worker_id;
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let ready = self.ready.clone();
+        let result = self.result.clone();
+        let shutdown = self.shutdown.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            wait_until_execution_ready(ready, result, shutdown).await?;
             let response = request(
                 &requests,
                 Frame::new(kind, worker_id, request_id, payload),
@@ -1520,6 +1573,51 @@ impl NativeExecution {
             }
             Python::attach(|py| Ok(py.None()))
         })
+    }
+}
+
+async fn wait_until_execution_ready(
+    mut ready: watch::Receiver<bool>,
+    mut result: watch::Receiver<Option<Result<pysandbox_protocol::ExecuteResult, String>>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> PyResult<()> {
+    loop {
+        if *ready.borrow() {
+            return Ok(());
+        }
+        if result.borrow().is_some() {
+            return Err(PyRuntimeError::new_err(
+                "execution stopped before becoming ready",
+            ));
+        }
+        if *shutdown.borrow() {
+            return Err(PyRuntimeError::new_err(
+                "sandbox process stopped before execution became ready",
+            ));
+        }
+        tokio::select! {
+            changed = ready.changed() => {
+                if changed.is_err() {
+                    return Err(PyRuntimeError::new_err(
+                        "execution stopped before becoming ready",
+                    ));
+                }
+            }
+            changed = result.changed() => {
+                if changed.is_err() || result.borrow().is_some() {
+                    return Err(PyRuntimeError::new_err(
+                        "execution stopped before becoming ready",
+                    ));
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Err(PyRuntimeError::new_err(
+                        "sandbox process stopped before execution became ready",
+                    ));
+                }
+            }
+        }
     }
 }
 

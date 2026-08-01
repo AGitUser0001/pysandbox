@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 
 from pysandbox import (
@@ -651,4 +652,36 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
       cancelled = await asyncio.wait_for(cancelled_worker.task, timeout=5)
       self.assertEqual(cancelled.reason, TerminationReason.CANCELLED)
     finally:
+      await runtime.close()
+
+  async def test_timeout_interrupts_running_and_waiting_guest(self) -> None:
+    runtime = PythonRuntime()
+    try:
+      await runtime.execute("pass")
+      for program in ("while True:\n  pass", "import time\ntime.sleep(10)"):
+        with self.subTest(program=program):
+          started = time.monotonic()
+          result = await runtime.execute(
+            program,
+            limits=RuntimeLimits(timeout=0.1),
+          )
+          elapsed = time.monotonic() - started
+
+          self.assertEqual(result.reason, TerminationReason.TIMEOUT)
+          self.assertLess(elapsed, 2)
+    finally:
+      await runtime.close()
+
+  async def test_immediate_dynamic_timeout_waits_until_execution_is_ready(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run("import time\ntime.sleep(10)", spin=False)
+    try:
+      started = time.monotonic()
+      await worker.set_limits(timeout=0.1)
+      result = await asyncio.wait_for(worker.task, timeout=5)
+
+      self.assertEqual(result.reason, TerminationReason.TIMEOUT)
+      self.assertLess(time.monotonic() - started, 5)
+    finally:
+      await worker.close()
       await runtime.close()

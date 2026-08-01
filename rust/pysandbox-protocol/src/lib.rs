@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -38,6 +38,7 @@ impl Frame {
 #[serde(rename_all = "snake_case")]
 pub enum FrameKind {
     Execute,
+    ExecuteStarted,
     ExecuteResult,
     GuestCall,
     GuestResponse,

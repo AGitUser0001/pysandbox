@@ -458,6 +458,17 @@ async fn execute(
             limits,
             request.rpc_methods,
             output_sender,
+            async {
+                outgoing
+                    .send(Frame::new(
+                        FrameKind::ExecuteStarted,
+                        worker_id,
+                        request_id,
+                        Vec::new(),
+                    ))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("sandbox connection is closed"))
+            },
         )
         .await;
     let (error, reason) = match result {

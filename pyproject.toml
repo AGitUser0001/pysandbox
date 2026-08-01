@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox"
-version = "1.4.0a1"
+version = "1.4.0a2"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 license = { file = "LICENSE.md" }
