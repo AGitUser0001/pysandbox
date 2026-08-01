@@ -1,5 +1,12 @@
 # pysandbox
 
+[![CI](https://github.com/AGitUser0001/pysandbox/actions/workflows/CI.yml/badge.svg)](https://github.com/AGitUser0001/pysandbox/actions/workflows/CI.yml)
+[![CodeQL](https://github.com/AGitUser0001/pysandbox/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AGitUser0001/pysandbox/actions/workflows/github-code-scanning/codeql)
+[![PyPI](https://img.shields.io/pypi/v/pysandbox-wasi)](https://pypi.org/project/pysandbox-wasi/)
+[![License](https://img.shields.io/pypi/l/pysandbox-wasi)](LICENSE.md)
+[![Python](https://img.shields.io/pypi/pyversions/pysandbox-wasi)](https://pypi.org/project/pysandbox-wasi/)
+[![Release](https://img.shields.io/github/v/release/AGitUser0001/pysandbox)](https://github.com/AGitUser0001/pysandbox/releases)
+
 An asynchronous Wasmtime-backed Python sandbox with two-way RPC.
 
 ## Demo
