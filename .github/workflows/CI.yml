@@ -106,7 +106,19 @@ jobs:
           submodules: recursive
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: |
+            3.12
+            3.13
+            3.14
+            3.14t
+            3.15
+            3.15t
+          allow-prereleases: true
+      - name: Find Python interpreters
+        id: python
+        run: >-
+          python .github/scripts/find_python_interpreters.py
+          python312 python313 python314 python314t python315 python315t
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v7
@@ -120,13 +132,7 @@ jobs:
           args: >-
             --release
             --out dist
-            --interpreter
-            /opt/python/cp312-cp312/bin/python
-            /opt/python/cp313-cp313/bin/python
-            /opt/python/cp314-cp314/bin/python
-            /opt/python/cp314-cp314t/bin/python
-            /opt/python/cp315-cp315/bin/python
-            /opt/python/cp315-cp315t/bin/python
+            --find-interpreter
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
           manylinux: "2_28"
@@ -138,23 +144,18 @@ jobs:
       - name: Test installed wheel
         working-directory: tests
         run: python -m pytest -n auto --dist worksteal .
-      - name: Set up free-threaded Python
-        id: python314t
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.14t"
       - name: Install free-threaded wheel
         run: >-
-          '${{ steps.python314t.outputs.python-path }}'
+          '${{ steps.python.outputs.python314t }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test free-threaded wheel
         working-directory: tests
         run: >-
-          '${{ steps.python314t.outputs.python-path }}'
+          '${{ steps.python.outputs.python314t }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
-          '${{ steps.python314t.outputs.python-path }}'
+          '${{ steps.python.outputs.python314t }}'
           -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
@@ -179,38 +180,22 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - id: python312
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-          architecture: ${{ matrix.platform.architecture }}
-      - id: python313
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-          architecture: ${{ matrix.platform.architecture }}
-      - id: python314
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-          architecture: ${{ matrix.platform.architecture }}
-      - id: python314t
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.14t"
-          architecture: ${{ matrix.platform.architecture }}
-      - id: python315
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.15"
+          python-version: |
+            3.12
+            3.13
+            3.14
+            3.14t
+            3.15
+            3.15t
           architecture: ${{ matrix.platform.architecture }}
           allow-prereleases: true
-      - id: python315t
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.15t"
-          architecture: ${{ matrix.platform.architecture }}
-          allow-prereleases: true
+      - name: Find Python interpreters
+        id: python
+        run: >-
+          python .github/scripts/find_python_interpreters.py
+          python312 python313 python314 python314t python315 python315t
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v7
@@ -226,35 +211,29 @@ jobs:
           args: >-
             --release
             --out dist
-            --interpreter
-            ${{ steps.python312.outputs.python-path }}
-            ${{ steps.python313.outputs.python-path }}
-            ${{ steps.python314.outputs.python-path }}
-            ${{ steps.python314t.outputs.python-path }}
-            ${{ steps.python315.outputs.python-path }}
-            ${{ steps.python315t.outputs.python-path }}
+            --find-interpreter
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
       - name: Install wheel
         run: >-
-          & '${{ steps.python312.outputs.python-path }}'
+          & '${{ steps.python.outputs.python312 }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test installed wheel
         working-directory: tests
         run: >-
-          & '${{ steps.python312.outputs.python-path }}'
+          & '${{ steps.python.outputs.python312 }}'
           -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
         run: >-
-          & '${{ steps.python314t.outputs.python-path }}'
+          & '${{ steps.python.outputs.python314t }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test free-threaded wheel
         working-directory: tests
         run: |
-          & '${{ steps.python314t.outputs.python-path }}' -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
-          & '${{ steps.python314t.outputs.python-path }}' -m pytest -n auto --dist worksteal .
+          & '${{ steps.python.outputs.python314t }}' -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
+          & '${{ steps.python.outputs.python314t }}' -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -276,32 +255,21 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - id: python312
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-      - id: python313
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-      - id: python314
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - id: python314t
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.14t"
-      - id: python315
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.15"
+          python-version: |
+            3.12
+            3.13
+            3.14
+            3.14t
+            3.15
+            3.15t
           allow-prereleases: true
-      - id: python315t
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.15t"
-          allow-prereleases: true
+      - name: Find Python interpreters
+        id: python
+        run: >-
+          python .github/scripts/find_python_interpreters.py
+          python312 python313 python314 python314t python315 python315t
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v7
@@ -317,37 +285,31 @@ jobs:
           args: >-
             --release
             --out dist
-            --interpreter
-            ${{ steps.python312.outputs.python-path }}
-            ${{ steps.python313.outputs.python-path }}
-            ${{ steps.python314.outputs.python-path }}
-            ${{ steps.python314t.outputs.python-path }}
-            ${{ steps.python315.outputs.python-path }}
-            ${{ steps.python315t.outputs.python-path }}
+            --find-interpreter
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
       - name: Install wheel
         run: >-
-          '${{ steps.python312.outputs.python-path }}'
+          '${{ steps.python.outputs.python312 }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test installed wheel
         working-directory: tests
         run: >-
-          '${{ steps.python312.outputs.python-path }}'
+          '${{ steps.python.outputs.python312 }}'
           -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
         run: >-
-          '${{ steps.python314t.outputs.python-path }}'
+          '${{ steps.python.outputs.python314t }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test free-threaded wheel
         working-directory: tests
         run: >-
-          '${{ steps.python314t.outputs.python-path }}'
+          '${{ steps.python.outputs.python314t }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
-          '${{ steps.python314t.outputs.python-path }}'
+          '${{ steps.python.outputs.python314t }}'
           -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
