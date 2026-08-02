@@ -731,6 +731,60 @@ class TestFacade:
     finally:
       await runtime.close()
 
+  async def test_guest_exit_codes(self) -> None:
+    runtime = PythonRuntime()
+    try:
+      for program, exit_code, stderr in (
+        ("raise SystemExit", 0, b""),
+        ("raise SystemExit(7)", 1, b""),
+        ("raise SystemExit('guest exit')", 1, b"guest exit\n"),
+        ("import os\nos._exit(9)", 1, b""),
+      ):
+        result = await runtime.execute(program)
+
+        assert result.reason == TerminationReason.EXITED
+        assert result.exit_code == exit_code
+        assert result.error is None
+        assert result.stderr == stderr
+    finally:
+      await runtime.close()
+
+  async def test_guest_base_exceptions_are_guest_errors(self) -> None:
+    runtime = PythonRuntime()
+    try:
+      for exception in (
+        "BaseException('base')",
+        "KeyboardInterrupt()",
+        "GeneratorExit()",
+      ):
+        result = await runtime.execute(f"raise {exception}")
+
+        assert result.reason == TerminationReason.GUEST_ERROR
+        assert result.exit_code is None
+        assert result.error is not None
+        assert exception.partition("(")[0] in result.error
+    finally:
+      await runtime.close()
+
+  async def test_concurrent_worker_call_base_exception_stops_worker(self) -> None:
+    runtime = PythonRuntime()
+    try:
+      for exception, reason in (
+        ("KeyboardInterrupt()", TerminationReason.GUEST_ERROR),
+        ("SystemExit(4)", TerminationReason.EXITED),
+      ):
+        worker = runtime.run(
+          f"def stop():\n  raise {exception}\n\nawait spin(concurrent=True)"
+        )
+        with pytest.raises(WorkerStoppedError):
+          await worker.call(("stop",), None)
+
+        result = await worker.task
+        assert result.reason == reason, result.error
+        assert result.exit_code == (1 if reason is TerminationReason.EXITED else None)
+    finally:
+      await runtime.close()
+
   @pytest.mark.parametrize(
     "program",
     ("while True:\n  pass", "import time\ntime.sleep(10)"),

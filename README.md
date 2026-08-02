@@ -190,6 +190,12 @@ print(
 )
 ```
 
+`SystemExit` and `os._exit()` produce `TerminationReason.EXITED`; their status is
+available as `result.exit_code`. The componentized Python runtime preserves `0`
+but normalizes every nonzero exit status to `1` through WASI Preview 3's
+success/failure exit operation. Other uncaught `BaseException` subclasses are
+reported as guest errors with a guest traceback.
+
 ## Virtual Filesystem
 
 `/python` is the packaged, immutable Python runtime. Other guest paths can be

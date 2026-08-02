@@ -14,6 +14,7 @@ interface host {
   program: func() -> string;
   call: async func(method: string, arguments: list<u8>) -> result<list<u8>, string>;
   spin-next: async func() -> option<spin-event>;
+  wake-spin-next: async func();
   worker-response: async func(
     request-id: u64,
     value: list<u8>,

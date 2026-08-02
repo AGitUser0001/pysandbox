@@ -2,6 +2,7 @@
 import ast
 import asyncio
 import inspect
+import os
 import sys
 import traceback
 import types
@@ -63,24 +64,54 @@ async def handle_worker_call(
     await host.worker_response(request.request_id, b"", traceback.format_exc())
 
 
-async def spin(namespace: dict[str, object], concurrent: bool) -> None:
-  tasks: set[asyncio.Task[None]] = set()
+async def capture_worker_failure(
+  namespace: dict[str, object],
+  request: object,
+) -> BaseException | None:
   try:
+    await handle_worker_call(namespace, request)
+  except BaseException as exc:
+    return exc
+  return None
+
+
+async def spin(namespace: dict[str, object], concurrent: bool) -> None:
+  if not concurrent:
     while (event := await host.spin_next()) is not None:
-      if event.call is None:
-        continue
-      if not concurrent:
+      if event.call is not None:
         await handle_worker_call(namespace, event.call)
+    return
+
+  tasks: set[asyncio.Task[BaseException | None]] = set()
+  spin_task = asyncio.create_task(host.spin_next())
+  try:
+    while True:
+      done, _ = await asyncio.wait(
+        tasks | {spin_task},
+        return_when=asyncio.FIRST_COMPLETED,
+      )
+      for task in done - {spin_task}:
+        tasks.remove(task)
+        failure = task.result()
+        if failure is not None and not spin_task.done():
+          await host.wake_spin_next()
+          await spin_task
+        if failure is not None:
+          raise failure
+      if spin_task not in done:
         continue
-      task = asyncio.create_task(handle_worker_call(namespace, event.call))
-      tasks.add(task)
-      task.add_done_callback(tasks.discard)
-      await asyncio.sleep(0)
+      event = spin_task.result()
+      if event is None:
+        return
+      spin_task = asyncio.create_task(host.spin_next())
+      if event.call is not None:
+        tasks.add(
+          asyncio.create_task(capture_worker_failure(namespace, event.call))
+        )
   finally:
     for task in tasks:
       task.cancel()
-    if tasks:
-      await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def call(method: str, *args: object, **kwargs: object) -> object:
@@ -108,7 +139,7 @@ class WitWorld(wit_world.WitWorld):
       configure_sys_path()
       sys.meta_path.insert(0, UnsupportedExtensionFinder())
       __import__("cbor2")
-    except Exception:
+    except BaseException:
       raise Err(traceback.format_exc())
 
   async def run(self) -> None:
@@ -127,5 +158,13 @@ class WitWorld(wit_world.WitWorld):
       value = eval(code, self.namespace)
       if inspect.isawaitable(value):
         await value
-    except Exception:
+    except SystemExit as exc:
+      code = exc.code
+      if code is None:
+        code = 0
+      elif not isinstance(code, int):
+        print(code, file=sys.stderr, flush=True)
+        code = 1
+      os._exit(code)
+    except BaseException:
       raise Err(traceback.format_exc())

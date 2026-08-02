@@ -365,6 +365,7 @@ impl SandboxProcess {
                     NativeExecutionResult {
                         error: result.error,
                         reason: termination_reason_name(result.reason).into(),
+                        exit_code: result.exit_code,
                         output: output_snapshot(&output),
                     },
                 )
@@ -1864,6 +1865,7 @@ fn output_snapshot(output: &SharedOutput) -> Vec<OutputPayload> {
 fn termination_reason_name(reason: TerminationReason) -> &'static str {
     match reason {
         TerminationReason::Completed => "completed",
+        TerminationReason::Exited => "exited",
         TerminationReason::GuestError => "guest_error",
         TerminationReason::Timeout => "timeout",
         TerminationReason::Cancelled => "cancelled",
@@ -1913,6 +1915,7 @@ impl NativeExecution {
                             NativeExecutionResult {
                                 error: result.error,
                                 reason: termination_reason_name(result.reason).into(),
+                                exit_code: result.exit_code,
                                 output: output_snapshot(&output),
                             },
                         )
@@ -2186,6 +2189,7 @@ impl NativeOutputEvent {
 struct NativeExecutionResult {
     error: Option<String>,
     reason: String,
+    exit_code: Option<i32>,
     output: Vec<OutputPayload>,
 }
 
@@ -2199,6 +2203,11 @@ impl NativeExecutionResult {
     #[getter]
     fn reason(&self) -> &str {
         &self.reason
+    }
+
+    #[getter]
+    fn exit_code(&self) -> Option<i32> {
+        self.exit_code
     }
 
     #[getter]

@@ -236,6 +236,7 @@ pub struct ExecutionLimits {
 pub(crate) enum ControlMessage {
     ApplyUpdates,
     Close,
+    WakeSpinNext,
 }
 
 #[derive(Debug)]
@@ -597,6 +598,7 @@ struct ComponentState {
     control_queue: Arc<AsyncMutex<mpsc::UnboundedReceiver<ControlMessage>>>,
     worker_call_queue: Arc<AsyncMutex<mpsc::Receiver<WorkerCallMessage>>>,
     execution_control: Arc<ExecutionControlState>,
+    worker_control: WorkerControl,
     rpc: RpcBridge,
     rpc_methods: HashSet<String>,
     max_guest_rpc_bytes: usize,
@@ -816,6 +818,7 @@ impl pysandbox::python::host::HostWithStore<ComponentState> for HasSelf<Componen
                 Some(pysandbox::python::host::SpinEvent { call: None })
             }
             ControlMessage::Close => None,
+            ControlMessage::WakeSpinNext => None,
           },
           message = worker_call_queue.recv() => {
             let WorkerCallMessage {
@@ -863,6 +866,11 @@ impl pysandbox::python::host::HostWithStore<ComponentState> for HasSelf<Componen
         } else {
             rpc.worker_response(request_id, value, error).await;
         }
+    }
+
+    async fn wake_spin_next(accessor: &Accessor<ComponentState, Self>) {
+        let control = accessor.with(|mut access| access.get().worker_control.clone());
+        let _ = control.send(ControlMessage::WakeSpinNext);
     }
 }
 
@@ -1040,6 +1048,7 @@ impl ComponentWorker {
                 control_queue: Arc::new(AsyncMutex::new(control_receiver)),
                 worker_call_queue: Arc::new(AsyncMutex::new(worker_call_receiver)),
                 execution_control: control.state.clone(),
+                worker_control: control.clone(),
                 rpc,
                 rpc_methods: HashSet::new(),
                 max_guest_rpc_bytes: 10 * 1024 * 1024,

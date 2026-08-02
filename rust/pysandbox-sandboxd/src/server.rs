@@ -173,6 +173,7 @@ async fn serve_connection(
                             frame.request_id,
                             Some("worker command queue is full".into()),
                             TerminationReason::InfrastructureError,
+                            None,
                         )
                         .await?;
                     }
@@ -183,6 +184,7 @@ async fn serve_connection(
                             frame.request_id,
                             Some("worker actor stopped".into()),
                             TerminationReason::InfrastructureError,
+                            None,
                         )
                         .await?;
                         workers.remove(&frame.worker_id);
@@ -390,6 +392,7 @@ fn spawn_worker(
                         request_id,
                         Some(error.to_string()),
                         TerminationReason::InfrastructureError,
+                        None,
                     )
                     .await;
                 }
@@ -427,6 +430,7 @@ async fn execute(
                 request_id,
                 Some(error.to_string()),
                 TerminationReason::InfrastructureError,
+                None,
             )
             .await;
             return;
@@ -473,16 +477,19 @@ async fn execute(
             },
         )
         .await;
-    let (error, reason) = match result {
-        Ok(Ok(())) => (None, TerminationReason::Completed),
-        Ok(Err(error)) => (Some(error), TerminationReason::GuestError),
+    let (error, reason, exit_code) = match result {
+        Ok(Ok(())) => (None, TerminationReason::Completed, None),
+        Ok(Err(error)) => (Some(error), TerminationReason::GuestError, None),
         Err(error) => {
             let output_limit_error = worker.output().limit_error();
             let memory_limit_error = worker.memory_limit_error();
+            let exit_code = error
+                .downcast_ref::<wasmtime_wasi::I32Exit>()
+                .map(|exit| exit.0);
             let message = output_limit_error
                 .clone()
                 .or_else(|| memory_limit_error.clone())
-                .unwrap_or_else(|| error.to_string());
+                .or_else(|| exit_code.is_none().then(|| error.to_string()));
             let reason = if output_limit_error.is_some() {
                 TerminationReason::OutputLimit
             } else if memory_limit_error.is_some() {
@@ -493,14 +500,16 @@ async fn execute(
                 TerminationReason::Timeout
             } else if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 TerminationReason::FuelExhausted
+            } else if exit_code.is_some() {
+                TerminationReason::Exited
             } else {
                 TerminationReason::RuntimeError
             };
-            (Some(message), reason)
+            (message, reason, exit_code)
         }
     };
     let _ = output_task.await;
-    let _ = send_execute_result(outgoing, worker_id, request_id, error, reason).await;
+    let _ = send_execute_result(outgoing, worker_id, request_id, error, reason, exit_code).await;
 }
 
 async fn apply_control(
@@ -591,13 +600,18 @@ async fn send_execute_result(
     request_id: u64,
     error: Option<String>,
     reason: TerminationReason,
+    exit_code: Option<i32>,
 ) -> anyhow::Result<()> {
     outgoing
         .send(Frame::new(
             FrameKind::ExecuteResult,
             worker_id,
             request_id,
-            encode_payload(&ExecuteResult { error, reason })?,
+            encode_payload(&ExecuteResult {
+                error,
+                reason,
+                exit_code,
+            })?,
         ))
         .await?;
     Ok(())

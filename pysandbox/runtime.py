@@ -65,6 +65,7 @@ class CpuShareConfig:
 
 class TerminationReason(StrEnum):
   COMPLETED = "completed"
+  EXITED = "exited"
   GUEST_ERROR = "guest_error"
   TIMEOUT = "timeout"
   CANCELLED = "cancelled"
@@ -185,6 +186,7 @@ class RuntimeResult:
   output: Output = field(default_factory=Output)
   error: str | None = None
   reason: TerminationReason = TerminationReason.COMPLETED
+  exit_code: int | None = None
 
   @property
   def stdout(self) -> bytes:
@@ -572,6 +574,7 @@ class Worker:
         self.result.output = output_from_native(native_result.output)
         self.result.error = native_result.error
         self.result.reason = TerminationReason(native_result.reason)
+        self.result.exit_code = native_result.exit_code
         return self.result
       finally:
         with suppress(Exception):

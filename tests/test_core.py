@@ -13,7 +13,7 @@ from pysandbox.runtime import TerminationReason, component_paths
 
 class TestCore:
   def test_protocol_version(self) -> None:
-    assert _core.protocol_version() == 5
+    assert _core.protocol_version() == 6
 
   async def test_tokio_awaitable(self) -> None:
     assert await _core.sleep(0) is None

@@ -131,6 +131,7 @@ The final result separates guest-visible diagnostics from infrastructure
 failures and carries a structured termination reason:
 
 - completed
+- exited (with a WASI-normalized `exit_code` from `SystemExit` or `os._exit`)
 - guest error
 - timeout
 - cancelled

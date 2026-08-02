@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -111,12 +111,14 @@ pub struct OutputPayload {
 pub struct ExecuteResult {
     pub error: Option<String>,
     pub reason: TerminationReason,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationReason {
     Completed,
+    Exited,
     GuestError,
     Timeout,
     Cancelled,
