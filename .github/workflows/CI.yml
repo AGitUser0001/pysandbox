@@ -176,8 +176,10 @@ jobs:
         platform:
           - name: macos-x86_64
             target: x86_64
+            deployment-target: "10.12"
           - name: macos-aarch64
             target: aarch64
+            deployment-target: "11.0"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -208,6 +210,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment-target }}
           PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
         with:
           target: ${{ matrix.platform.target }}
