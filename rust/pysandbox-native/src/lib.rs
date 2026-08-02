@@ -58,6 +58,7 @@ fn run_sandboxd(
     python_root: PathBuf,
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
+    compilation_cache: Option<PathBuf>,
     cache_vfs: bool,
     cache_vfs_negative: bool,
     cpu_share_enabled: bool,
@@ -72,6 +73,7 @@ fn run_sandboxd(
                 &socket_name,
                 &component_path,
                 &python_root,
+                compilation_cache.as_deref(),
                 max_ipc_frame_bytes,
                 worker_queue_capacity,
                 cache_vfs,
@@ -456,6 +458,7 @@ impl SandboxProcess {
     executable_arguments = Vec::new(),
     max_ipc_frame_bytes = DEFAULT_MAX_FRAME_BYTES,
     worker_queue_capacity = 256,
+    compilation_cache = None,
     host_dispatch_concurrency = 64,
     host_dispatch_queue_capacity = 256,
     cache_vfs = false,
@@ -474,6 +477,7 @@ fn start_sandbox<'py>(
     executable_arguments: Vec<String>,
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
+    compilation_cache: Option<PathBuf>,
     host_dispatch_concurrency: usize,
     host_dispatch_queue_capacity: usize,
     cache_vfs: bool,
@@ -521,6 +525,7 @@ fn start_sandbox<'py>(
             .arg(python_root)
             .arg(max_ipc_frame_bytes.to_string())
             .arg(worker_queue_capacity.to_string())
+            .arg(compilation_cache.map_or_else(|| "none".into(), |path| path.into_os_string()))
             .arg(cache_vfs.to_string())
             .arg(cache_vfs_negative.to_string())
             .arg(cpu_share_enabled.to_string())

@@ -114,6 +114,9 @@ Linker, and compiled Component. Each worker actor creates an independent:
 
 The Store is actor-owned and never accessed concurrently. Sharing compiled
 runtime infrastructure reduces startup cost without sharing guest state.
+Compiled Wasmtime artifacts are cached across daemon processes by default.
+`PythonRuntime(compilation_cache=False)` disables this, while a `Path` selects
+an explicit cache directory.
 
 ## Execution and Output
 

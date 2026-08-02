@@ -33,6 +33,12 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         .and_then(|value| value.into_string().ok())
         .ok_or_else(|| anyhow::anyhow!(usage()))?
         .parse()?;
+    let compilation_cache = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!(usage()))?;
+    let compilation_cache =
+        (compilation_cache != PathBuf::from("none")).then_some(compilation_cache);
     let cache_vfs = arguments
         .next()
         .map(|value| {
@@ -89,6 +95,7 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
         &socket_name,
         &component_path,
         &python_root,
+        compilation_cache.as_deref(),
         max_ipc_frame_bytes,
         worker_queue_capacity,
         cache_vfs,
@@ -103,7 +110,8 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<()> {
 
 fn usage() -> &'static str {
     "usage: pysandbox-sandboxd <socket-name> <component> <python-root> \
-     <max-ipc-frame-bytes> <worker-queue-capacity> <cache-vfs> <cache-vfs-negative> \
+     <max-ipc-frame-bytes> <worker-queue-capacity> <compilation-cache> \
+     <cache-vfs> <cache-vfs-negative> \
      <cpu-share-enabled> <cpu-share-limit-percent> <cpu-share-sample-interval-ms> \
      <cpu-share-activity-timeout-ms>"
 }

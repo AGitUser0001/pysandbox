@@ -14,6 +14,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Self
 
+from platformdirs import user_cache_path
+
 from . import _core
 from .packages import PackageCache, PackageEnvironment, PackageManager
 from .rpc import RpcHost
@@ -222,6 +224,7 @@ class PythonRuntime:
     cache_vfs: bool = False,
     cache_vfs_negative: bool = False,
     package_cache: PackageCache | None = None,
+    compilation_cache: bool | Path = True,
   ) -> None:
     if max_ipc_frame_bytes <= 0:
       raise ValueError("max_ipc_frame_bytes must be positive")
@@ -239,6 +242,7 @@ class PythonRuntime:
     self.vfs = vfs
     self.cache_vfs = cache_vfs
     self.cache_vfs_negative = cache_vfs_negative
+    self.compilation_cache = compilation_cache
     self.packages = PackageManager(cache=package_cache)
     self.rpc = RpcHost(self._register_handler)
     self._sandbox: _core.SandboxProcess | None = None
@@ -372,6 +376,7 @@ class PythonRuntime:
           executable_arguments=["-m", "pysandbox._sandboxd"],
           max_ipc_frame_bytes=self.max_ipc_frame_bytes,
           worker_queue_capacity=self.worker_queue_capacity,
+          compilation_cache=self._compilation_cache_path(),
           host_dispatch_concurrency=self.host_dispatch_concurrency,
           host_dispatch_queue_capacity=self.host_dispatch_queue_capacity,
           cache_vfs=self.cache_vfs,
@@ -398,6 +403,13 @@ class PythonRuntime:
         sandbox.set_vfs(self.vfs)
       self._sandbox = sandbox
       return sandbox
+
+  def _compilation_cache_path(self) -> Path | None:
+    if self.compilation_cache is True:
+      return user_cache_path("pysandbox") / "wasmtime"
+    if self.compilation_cache is False:
+      return None
+    return self.compilation_cache.resolve()
 
   def _cleanup_socket_directory(self) -> None:
     if self._socket_directory is not None:

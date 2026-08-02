@@ -274,6 +274,18 @@ to each worker. RPC and VFS requests share the worker's limits, preventing one
 guest from consuming the sandbox-wide host dispatch budget. Configure them on
 the execution's `RuntimeLimits`.
 
+Wasmtime compilation is cached by default in the platform cache directory.
+Disable it or select an explicit directory with `compilation_cache`:
+
+```python
+from pathlib import Path
+
+runtime = PythonRuntime(compilation_cache=False)
+runtime = PythonRuntime(compilation_cache=Path("custom-cache"))
+```
+
+`True` uses `platformdirs.user_cache_path("pysandbox") / "wasmtime"`.
+
 ## Packages
 
 Resolve pure-Python wheels into immutable, reusable package layers, then attach

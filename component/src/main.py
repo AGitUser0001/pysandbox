@@ -105,9 +105,7 @@ async def spin(namespace: dict[str, object], concurrent: bool) -> None:
         return
       spin_task = asyncio.create_task(host.spin_next())
       if event.call is not None:
-        tasks.add(
-          asyncio.create_task(capture_worker_failure(namespace, event.call))
-        )
+        tasks.add(asyncio.create_task(capture_worker_failure(namespace, event.call)))
   finally:
     for task in tasks:
       task.cancel()

@@ -16,8 +16,8 @@ use tokio::io::AsyncWrite;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{
-    AsContextMut, Config, Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits,
-    StoreLimitsBuilder, UpdateDeadline,
+    AsContextMut, Cache, CacheConfig, Config, Engine, ResourceLimiter, Store, StoreContextMut,
+    StoreLimits, StoreLimitsBuilder, UpdateDeadline,
 };
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
@@ -919,6 +919,7 @@ pub struct ComponentRuntime {
 impl ComponentRuntime {
     pub(crate) fn load(
         component_path: &Path,
+        compilation_cache: Option<&Path>,
         vfs: RemoteVfs,
         cpu_share_enabled: bool,
         cpu_share_limit_percent: Option<f64>,
@@ -930,16 +931,28 @@ impl ComponentRuntime {
         cpu_share_config.limit_percent = cpu_share_limit_percent;
         cpu_share_config.sample_interval = cpu_share_sample_interval;
         cpu_share_config.activity_timeout = cpu_share_activity_timeout;
-        Self::load_with_filesystem(component_path, vfs, true, cpu_share_config)
+        Self::load_with_filesystem(
+            component_path,
+            compilation_cache,
+            vfs,
+            true,
+            cpu_share_config,
+        )
     }
 
     fn load_with_filesystem(
         component_path: &Path,
+        compilation_cache: Option<&Path>,
         vfs: RemoteVfs,
         hybrid_filesystem: bool,
         cpu_share_config: CpuShareConfig,
     ) -> Result<Self> {
         let mut config = Config::new();
+        if let Some(cache_root) = compilation_cache {
+            let mut cache_config = CacheConfig::new();
+            cache_config.with_directory(cache_root);
+            config.cache(Some(Cache::new(cache_config)?));
+        }
         config.wasm_component_model_async(true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
@@ -1196,7 +1209,7 @@ async fn run_build_program(
     let mut cpu_share_config = CpuShareConfig::new(DEFAULT_FUEL_YIELD_INTERVAL);
     cpu_share_config.enabled = false;
     let runtime =
-        ComponentRuntime::load_with_filesystem(component_path, vfs, false, cpu_share_config)?;
+        ComponentRuntime::load_with_filesystem(component_path, None, vfs, false, cpu_share_config)?;
     let (control, control_receiver, worker_call_receiver) = WorkerControl::new(1);
     let rpc = RpcBridge::new(0, outgoing, next_request_id, pending_guest_calls);
     let mut worker = ComponentWorker::load_with_python_permissions(

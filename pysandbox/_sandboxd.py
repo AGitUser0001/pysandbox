@@ -8,11 +8,11 @@ def main() -> None:
 
   from . import _core
 
-  if len(sys.argv) != 12:
+  if len(sys.argv) != 13:
     raise SystemExit(
       "usage: python -m pysandbox._sandboxd "
       "<socket-name> <component> <python-root> <max-ipc-frame-bytes> "
-      "<worker-queue-capacity> <cache-vfs> <cache-vfs-negative>"
+      "<worker-queue-capacity> <compilation-cache> <cache-vfs> <cache-vfs-negative>"
       " <cpu-share-enabled> <cpu-share-limit-percent>"
       " <cpu-share-sample-interval-ms> <cpu-share-activity-timeout-ms>"
     )
@@ -22,12 +22,13 @@ def main() -> None:
     Path(sys.argv[3]),
     int(sys.argv[4]),
     int(sys.argv[5]),
-    sys.argv[6] == "true",
+    None if sys.argv[6] == "none" else Path(sys.argv[6]),
     sys.argv[7] == "true",
     sys.argv[8] == "true",
-    None if sys.argv[9] == "none" else float(sys.argv[9]),
-    int(sys.argv[10]),
+    sys.argv[9] == "true",
+    None if sys.argv[10] == "none" else float(sys.argv[10]),
     int(sys.argv[11]),
+    int(sys.argv[12]),
   )
 
 

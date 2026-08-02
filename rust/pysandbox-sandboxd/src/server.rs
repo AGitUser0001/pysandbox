@@ -24,6 +24,7 @@ pub async fn serve(
     socket_name: &str,
     component_path: &Path,
     python_root: &Path,
+    compilation_cache: Option<&Path>,
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
     cache_vfs: bool,
@@ -63,6 +64,7 @@ pub async fn serve(
         connection,
         component_path.to_owned(),
         python_root.to_owned(),
+        compilation_cache.map(Path::to_owned),
         max_ipc_frame_bytes,
         worker_queue_capacity,
         cache_vfs,
@@ -79,6 +81,7 @@ async fn serve_connection(
     connection: Stream,
     component_path: PathBuf,
     python_root: PathBuf,
+    compilation_cache: Option<PathBuf>,
     max_ipc_frame_bytes: usize,
     worker_queue_capacity: usize,
     cache_vfs: bool,
@@ -114,6 +117,7 @@ async fn serve_connection(
     );
     let runtime = ComponentRuntime::load(
         &component_path,
+        compilation_cache.as_deref(),
         vfs.clone(),
         cpu_share_enabled,
         cpu_share_limit_percent,
