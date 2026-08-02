@@ -12,13 +12,10 @@ on:
     branches:
       - main
   pull_request:
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing GitHub Release tag to publish
+        description: Git tag to publish
         required: false
         type: string
 
@@ -26,11 +23,37 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'release' && inputs.release_tag == '' }}
+  group: ci-${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: ${{ inputs.release_tag == '' }}
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate release source
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          PACKAGE_VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$RELEASE_TAG" != "v$PACKAGE_VERSION" ]; then
+            echo "release tag $RELEASE_TAG does not match package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            TAG_SHA=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "release tag $RELEASE_TAG points to $TAG_SHA, not $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+
   checks:
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -64,6 +87,7 @@ jobs:
 
   runtime:
     name: Component runtime
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -359,6 +383,7 @@ jobs:
           -m pytest -n auto --dist worksteal .
 
   sdist:
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -380,8 +405,9 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'release' || inputs.release_tag != '' }}
+    if: ${{ inputs.release_tag != '' }}
     needs:
+      - checks
       - test-wheels
       - sdist
     environment: release
@@ -393,7 +419,7 @@ jobs:
       - uses: actions/download-artifact@v7
       - name: Package component runtime
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: tar -C component-runtime -czf "pysandbox-component-runtime-$RELEASE_TAG.tar.gz" .
       - name: Generate artifact attestation
         uses: actions/attest@v4
@@ -401,14 +427,68 @@ jobs:
           subject-path: |
             wheels-*/*
             pysandbox-component-runtime-*.tar.gz
-      - name: Attach artifacts to GitHub Release
+      - name: Validate release tag
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
-          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ github.event.release.tag_name || inputs.release_tag }}.tar.gz
-        run: gh release upload "$RELEASE_TAG" wheels-*/* "$RUNTIME_ARCHIVE" --clobber
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          PACKAGE_VERSION=$(python - <<'PY'
+          import glob
+          import zipfile
+
+          versions = set()
+          for wheel in glob.glob("wheels-*/*.whl"):
+              with zipfile.ZipFile(wheel) as archive:
+                  metadata = next(
+                      name for name in archive.namelist()
+                      if name.endswith(".dist-info/METADATA")
+                  )
+                  for line in archive.read(metadata).decode().splitlines():
+                      if line.startswith("Version: "):
+                          versions.add(line.removeprefix("Version: "))
+                          break
+
+          if len(versions) != 1:
+              raise SystemExit(f"expected one wheel version, found {sorted(versions)!r}")
+          print(versions.pop())
+          PY
+          )
+          if [ "$RELEASE_TAG" != "v$PACKAGE_VERSION" ]; then
+            echo "release tag $RELEASE_TAG does not match package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            TAG_SHA=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "release tag $RELEASE_TAG points to $TAG_SHA, not $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Publish to PyPI
         run: uv publish --trusted-publishing always "wheels-*/*"
+      - name: Ensure Git tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if ! gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            gh api "repos/$GH_REPO/git/refs" \
+              --method POST \
+              --field "ref=refs/tags/$RELEASE_TAG" \
+              --field "sha=$GITHUB_SHA"
+          fi
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes ""
+          fi
+      - name: Attach artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RUNTIME_ARCHIVE: pysandbox-component-runtime-${{ inputs.release_tag }}.tar.gz
+        run: gh release upload "$RELEASE_TAG" wheels-*/* "$RUNTIME_ARCHIVE" --clobber
