@@ -202,11 +202,23 @@ The WASI filesystem is hybrid:
   `site-packages` path.
 - Other guest paths are served by the optional host VFS.
 
-The VFS exposes async `stat`, `read`, and `list` operations. Successful results
-may be cached across workers. Invalidation is generation-aware and recursive
-for descendants, preventing an in-flight stale response from repopulating the
-cache. Errors are not cached by default; optional negative caching covers stable
-non-I/O failures but never overload or malformed responses. The VFS is read-only.
+`VirtualFileSystem` requires `stat`, `read`, and `list`; handlers may be
+synchronous or asynchronous. Metadata and directory entries carry independent
+read and write permissions. Optional `write`, `append`, `truncate`, `rename`,
+`mkdir`, and `delete` handlers expose the corresponding guest operations.
+Unsupported optional methods raise `NotImplementedError`.
+
+The native layer supplies fallbacks where the implemented primitives permit:
+append becomes an offset write, truncate becomes a complete read and rewrite,
+and file rename becomes a non-atomic copy and delete. Directory rename requires
+an explicit handler. Host exceptions are translated into the corresponding
+guest filesystem errors.
+
+Successful results may be cached across workers. Invalidation is
+generation-aware and recursive for descendants, preventing an in-flight stale
+response from repopulating the cache. Errors are not cached by default;
+optional negative caching covers stable non-I/O failures but never overload or
+malformed responses. Successful mutations invalidate affected cached paths.
 
 `pysandbox.packages` resolves requirements in Python with `resolvelib`. Wheels
 are validated and installed into immutable reusable layers. Source distributions
@@ -234,7 +246,7 @@ Trusted Publishing.
 The application, exposed RPC handlers, VFS implementation, package resolver,
 and enabled source-package build backends are trusted. Guest Python is
 untrusted and is confined to its Store, configured capabilities, resource
-limits, read-only filesystem view, and explicit RPC allowlist.
+limits, host-authorized filesystem view, and explicit RPC allowlist.
 
 The shared daemon improves efficiency but is still a single infrastructure
 failure domain: a daemon failure stops every worker it owns. Store isolation is

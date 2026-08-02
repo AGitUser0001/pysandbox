@@ -192,29 +192,53 @@ print(
 ## Virtual Filesystem
 
 `/python` is the packaged, immutable Python runtime. Other guest paths can be
-served by a read-only host VFS:
+served by a host VFS:
 
 ```python
-from pysandbox import PythonRuntime, VfsDirectoryEntry, VfsMetadata
+from pysandbox import (
+  PythonRuntime,
+  VfsDirectoryEntry,
+  VfsMetadata,
+  VirtualFileSystem,
+)
 
 
-class Vfs:
+class Vfs(VirtualFileSystem):
   async def stat(self, path: str) -> VfsMetadata: ...
 
   async def read(self, path: str) -> bytes: ...
 
   async def list(self, path: str) -> list[VfsDirectoryEntry]: ...
 
+  async def write(
+    self,
+    path: str,
+    data: bytes,
+    offset: int | None,
+  ) -> None: ...
+
 
 runtime = PythonRuntime(vfs=Vfs(), cache_vfs=True)
 ```
+
+`VirtualFileSystem` requires `stat`, `read`, and `list`. Writable filesystems
+may implement `write`, `delete`, `mkdir`, `append`, `truncate`, and `rename`.
+Unsupported optional operations raise `NotImplementedError`. Native fallbacks
+provide append from an offset write, truncate from a complete read and rewrite,
+and non-atomic file rename from read, write, and delete. Directory rename
+requires an explicit implementation.
+
+`VfsMetadata` and `VfsDirectoryEntry` expose independent `read` and `write`
+permissions. The guest receives normal filesystem errors for denied,
+unsupported, missing, conflicting, and non-empty-directory operations.
 
 Handlers may be synchronous or asynchronous. With caching enabled, results
 are shared across workers until the host calls
 `await runtime.invalidate_vfs(path)`. Passing no path clears the whole cache.
 Successful responses are cached by default. Set `cache_vfs_negative=True` to
 also cache non-I/O errors such as missing paths; overload, transport, and
-malformed-response errors are never cached. The guest cannot write to the VFS.
+malformed-response errors are never cached. Successful mutations invalidate
+the affected cached paths.
 
 `worker_queue_capacity` bounds pending executions and user-level calls for
 each worker. When either queue is full, new work fails immediately without
