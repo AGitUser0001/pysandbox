@@ -99,15 +99,19 @@ jobs:
         platform:
           - name: linux-x86_64
             target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
             zig: true
           - name: linux-aarch64
             target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
             zig: true
           - name: windows-x64
             target: x86_64-pc-windows-msvc
+            manylinux: "off"
             zig: false
           - name: windows-aarch64
             target: aarch64-pc-windows-msvc
+            manylinux: "off"
             zig: false
     steps:
       - uses: actions/checkout@v6
@@ -154,10 +158,9 @@ jobs:
             '${{ steps.python.outputs.python315 }}'
             '${{ steps.python.outputs.python315t }}'
             ${{ matrix.platform.zig && '--zig' || '' }}
-            ${{ startsWith(matrix.platform.name, 'linux-') && '--compatibility manylinux_2_28' || '' }}
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
-          manylinux: "off"
+          manylinux: ${{ matrix.platform.manylinux }}
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
