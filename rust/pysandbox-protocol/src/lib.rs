@@ -191,9 +191,50 @@ pub enum FuelOperation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "operation")]
 pub enum VfsRequest {
-    Stat { path: String },
-    Read { path: String },
-    List { path: String },
+    Stat {
+        path: String,
+    },
+    Read {
+        path: String,
+        stat: Option<VfsStatResult>,
+    },
+    Write {
+        path: String,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        offset: Option<u64>,
+        stat: Option<VfsStatResult>,
+    },
+    Append {
+        path: String,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        stat: Option<VfsStatResult>,
+    },
+    Truncate {
+        path: String,
+        size: u64,
+        stat: Option<VfsStatResult>,
+    },
+    Delete {
+        path: String,
+        directory: bool,
+        stat: Option<VfsStatResult>,
+    },
+    Mkdir {
+        path: String,
+        stat: Option<VfsStatResult>,
+    },
+    Rename {
+        from: String,
+        to: String,
+        stat: Option<VfsStatResult>,
+        to_stat: Option<VfsStatResult>,
+    },
+    List {
+        path: String,
+        stat: Option<VfsStatResult>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -207,6 +248,14 @@ pub enum VfsNodeKind {
 pub struct VfsMetadata {
     pub kind: VfsNodeKind,
     pub size: u64,
+    pub read: bool,
+    pub write: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VfsStatResult {
+    pub value: Option<VfsMetadata>,
+    pub error: Option<VfsError>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,6 +267,7 @@ pub struct VfsDirectoryEntry {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "value")]
 pub enum VfsValue {
+    Unit,
     Metadata(VfsMetadata),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
     Entries(Vec<VfsDirectoryEntry>),
@@ -227,6 +277,8 @@ pub enum VfsValue {
 pub struct VfsResponse {
     pub value: Option<VfsValue>,
     pub error: Option<VfsError>,
+    pub stat: Option<VfsStatResult>,
+    pub invalidate: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -239,8 +291,10 @@ pub struct VfsError {
 #[serde(rename_all = "snake_case")]
 pub enum VfsErrorCode {
     NotFound,
+    AlreadyExists,
     NotDirectory,
     IsDirectory,
+    DirectoryNotEmpty,
     PermissionDenied,
     Invalid,
     Io,

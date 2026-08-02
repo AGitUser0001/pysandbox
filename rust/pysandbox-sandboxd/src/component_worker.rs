@@ -1253,7 +1253,7 @@ fn python_vfs(
 ) -> Result<HybridVfsCtx<RemoteVfs>> {
     let mut vfs = HybridVfsCtx::new(runtime.vfs.for_worker(worker_id));
     vfs.allow_blocking_current_thread(true);
-    vfs.add_vfs_preopen("/", DirPerms::READ, FilePerms::READ);
+    vfs.add_vfs_preopen("/", DirPerms::all(), FilePerms::all());
     let mut python = RealDir::open_ambient(python_root, dir_perms, file_perms)?;
     python.allow_blocking = true;
     for package_path in package_paths {

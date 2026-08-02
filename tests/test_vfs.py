@@ -14,16 +14,25 @@ from pysandbox import (
 class MemoryVfs:
   def __init__(self) -> None:
     self.files = {"/hello.py": b"value = 42\n"}
+    self.directories = {"/"}
+    self.writable: set[str] = set()
+    self.unreadable: set[str] = set()
+    self.root_write = False
     self.read_errors: set[str] = set()
     self.calls: list[tuple[str, str]] = []
 
   async def stat(self, path: str) -> VfsMetadata:
     self.calls.append(("stat", path))
-    if path == "/":
-      return VfsMetadata("directory")
+    if path in self.directories:
+      return VfsMetadata("directory", write=self.root_write)
     if path in self.files:
       data = self.files[path]
-      return VfsMetadata("file", len(data))
+      return VfsMetadata(
+        "file",
+        len(data),
+        read=path not in self.unreadable,
+        write=path in self.writable,
+      )
     raise FileNotFoundError(path)
 
   async def read(self, path: str) -> bytes:
@@ -35,6 +44,56 @@ class MemoryVfs:
     except KeyError:
       raise FileNotFoundError(path) from None
 
+  async def write(self, path: str, data: bytes, offset: int | None) -> None:
+    self.calls.append(("write", path))
+    if path not in self.files:
+      if not self.root_write:
+        raise PermissionError(path)
+      self.files[path] = b""
+      self.writable.add(path)
+    elif path not in self.writable:
+      raise PermissionError(path)
+    if offset is None:
+      self.files[path] = data
+      return
+    contents = bytearray(self.files[path])
+    if offset > len(contents):
+      contents.extend(b"\0" * (offset - len(contents)))
+    end = offset + len(data)
+    if end > len(contents):
+      contents.extend(b"\0" * (end - len(contents)))
+    contents[offset:end] = data
+    self.files[path] = bytes(contents)
+
+  async def append(self, path: str, data: bytes) -> None:
+    self.calls.append(("append", path))
+    if path not in self.files:
+      raise FileNotFoundError(path)
+    if path not in self.writable:
+      raise PermissionError(path)
+    self.files[path] += data
+
+  async def delete(self, path: str) -> None:
+    self.calls.append(("delete", path))
+    if path in self.files:
+      del self.files[path]
+      self.writable.discard(path)
+      return
+    if path in self.directories:
+      prefix = path.rstrip("/") + "/"
+      entries = set(self.files) | self.directories
+      if any(name != path and name.startswith(prefix) for name in entries):
+        raise OSError("directory not empty")
+      self.directories.remove(path)
+      return
+    raise FileNotFoundError(path)
+
+  async def mkdir(self, path: str) -> None:
+    self.calls.append(("mkdir", path))
+    if path in self.files or path in self.directories:
+      raise FileExistsError(path)
+    self.directories.add(path)
+
   async def list(self, path: str) -> list[VfsDirectoryEntry]:
     self.calls.append(("list", path))
     if path != "/":
@@ -42,6 +101,7 @@ class MemoryVfs:
     return [
       VfsDirectoryEntry(name.removeprefix("/"), "file", len(data))
       for name, data in self.files.items()
+      if "/" not in name.removeprefix("/")
     ]
 
 
@@ -59,6 +119,15 @@ class DirectoryVfs:
 
   def read(self, path: str) -> bytes:
     return self._path(path).read_bytes()
+
+  def write(self, path: str, data: bytes, offset: int | None) -> None:
+    raise PermissionError(path)
+
+  def delete(self, path: str) -> None:
+    raise PermissionError(path)
+
+  def mkdir(self, path: str) -> None:
+    raise PermissionError(path)
 
   def list(self, path: str) -> list[VfsDirectoryEntry]:
     local = self._path(path)
@@ -80,7 +149,131 @@ class DirectoryVfs:
     return local
 
 
+class NativeMutationVfs(MemoryVfs):
+  async def truncate(self, path: str, size: int) -> None:
+    self.calls.append(("truncate", path))
+    data = self.files[path]
+    self.files[path] = data[:size].ljust(size, b"\0")
+
+  async def rename(self, source: str, destination: str) -> None:
+    self.calls.append(("rename", source))
+    if source in self.files:
+      self.files[destination] = self.files.pop(source)
+      if source in self.writable:
+        self.writable.remove(source)
+        self.writable.add(destination)
+      return
+    if source in self.directories:
+      self.directories.remove(source)
+      self.directories.add(destination)
+      return
+    raise FileNotFoundError(source)
+
+
 class TestVfs:
+  async def test_file_mutations_use_fallbacks(self) -> None:
+    vfs = MemoryVfs()
+    vfs.root_write = True
+    vfs.files["/source.bin"] = b"abcdef"
+    vfs.writable.add("/source.bin")
+    runtime = PythonRuntime(vfs=vfs, cache_vfs=True)
+    try:
+      result = await runtime.execute(
+        "import os\n"
+        "with open('/source.bin', 'r+b') as file:\n"
+        "  file.truncate(3)\n"
+        "assert 'source.bin' in os.listdir('/')\n"
+        "os.rename('/source.bin', '/renamed.bin')\n"
+        "assert 'source.bin' not in os.listdir('/')\n"
+        "assert 'renamed.bin' in os.listdir('/')\n"
+        "os.remove('/renamed.bin')\n"
+        "assert 'renamed.bin' not in os.listdir('/')\n"
+        "os.mkdir('/empty')\n"
+        "os.rmdir('/empty')\n",
+      )
+      assert result.error is None, result.error
+      assert "/source.bin" not in vfs.files
+      assert "/renamed.bin" not in vfs.files
+      assert "/empty" not in vfs.directories
+      assert ("read", "/source.bin") in vfs.calls
+      assert ("write", "/renamed.bin") in vfs.calls
+      assert ("delete", "/source.bin") in vfs.calls
+      assert ("mkdir", "/empty") in vfs.calls
+    finally:
+      await runtime.close()
+
+  async def test_native_mutations_support_directory_rename(self) -> None:
+    vfs = NativeMutationVfs()
+    vfs.root_write = True
+    vfs.files["/data.bin"] = b"abcdef"
+    vfs.writable.add("/data.bin")
+    vfs.directories.add("/before")
+    runtime = PythonRuntime(vfs=vfs)
+    try:
+      result = await runtime.execute(
+        "import os\n"
+        "with open('/data.bin', 'r+b') as file:\n"
+        "  file.truncate(2)\n"
+        "os.rename('/before', '/after')\n",
+      )
+      assert result.error is None, result.error
+      assert vfs.files["/data.bin"] == b"ab"
+      assert "/before" not in vfs.directories
+      assert "/after" in vfs.directories
+      assert ("truncate", "/data.bin") in vfs.calls
+      assert ("rename", "/before") in vfs.calls
+    finally:
+      await runtime.close()
+
+  async def test_write_permissions_append_and_cache_invalidation(self) -> None:
+    vfs = MemoryVfs()
+    vfs.root_write = True
+    vfs.files["/editable.txt"] = b"abc"
+    vfs.writable.add("/editable.txt")
+    vfs.files["/write-only.txt"] = b"secret"
+    vfs.writable.add("/write-only.txt")
+    vfs.unreadable.add("/write-only.txt")
+    runtime = PythonRuntime(vfs=vfs, cache_vfs=True)
+    try:
+      result = await runtime.execute(
+        "with open('/editable.txt', 'r+') as file:\n"
+        "  file.seek(1)\n"
+        "  file.write('Z')\n"
+        "with open('/editable.txt', 'a') as file:\n"
+        "  file.write('!')\n"
+        "with open('/created.txt', 'w') as file:\n"
+        "  file.write('new')\n"
+        "with open('/write-only.txt', 'w') as file:\n"
+        "  file.write('changed')\n",
+      )
+      assert result.error is None, result.error
+      assert vfs.files["/editable.txt"] == b"aZc!"
+      assert vfs.files["/created.txt"] == b"new"
+      assert vfs.files["/write-only.txt"] == b"changed"
+      assert ("append", "/editable.txt") in vfs.calls
+
+      vfs.root_write = False
+      await runtime.invalidate_vfs("/")
+      truncate = await runtime.execute(
+        "with open('/editable.txt', 'w') as file:\n  file.write('replacement')\n",
+      )
+      assert truncate.error is None
+      assert vfs.files["/editable.txt"] == b"replacement"
+      denied_create = await runtime.execute("open('/denied.txt', 'w')")
+      assert "PermissionError" in (denied_create.error or "")
+
+      denied = await runtime.execute("open('/write-only.txt').read()")
+      assert "PermissionError" in (denied.error or "")
+
+      refreshed = await runtime.execute(
+        "print(open('/editable.txt').read(), flush=True)",
+      )
+      assert refreshed.error is None
+      assert refreshed.stdout == b"replacement\n"
+      assert vfs.calls.count(("stat", "/editable.txt")) >= 2
+    finally:
+      await runtime.close()
+
   async def test_overload_error_is_not_cached(self) -> None:
     vfs = MemoryVfs()
     runtime = PythonRuntime(
@@ -197,7 +390,8 @@ class TestVfs:
       )
       assert second.error is None
       assert vfs.calls.count(("read", "/hello.py")) == initial_reads
-      assert vfs.calls.count(("stat", "/hello.py")) == 1
+      # The directory listing populated the same stat cache used by read/open.
+      assert vfs.calls.count(("stat", "/hello.py")) == 0
 
       vfs.files["/hello.py"] = b"value = 84\n"
       await runtime.invalidate_vfs("/hello.py")

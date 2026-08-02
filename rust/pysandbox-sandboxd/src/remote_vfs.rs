@@ -6,7 +6,8 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use eryx_vfs::{DirEntry, Metadata, VfsError, VfsResult, VfsStorage};
 use pysandbox_protocol::{
-    Frame, FrameKind, VfsErrorCode, VfsRequest, VfsResponse, VfsValue, encode_payload,
+    Frame, FrameKind, VfsErrorCode, VfsRequest, VfsResponse, VfsStatResult, VfsValue,
+    encode_payload,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -84,9 +85,26 @@ impl RemoteVfs {
         });
     }
 
-    async fn request(&self, key: CacheKey, request: VfsRequest) -> VfsResult<VfsValue> {
-        if matches!(self.policy, CachePolicy::Invalidated { .. })
-            && let Some(response) = self.cache.lock().await.get(&key).cloned()
+    async fn cached_stat(&self, path: &str) -> Option<VfsStatResult> {
+        if !matches!(self.policy, CachePolicy::Invalidated { .. }) {
+            return None;
+        }
+        self.cache
+            .lock()
+            .await
+            .get(&CacheKey::Stat(path.to_owned()))
+            .map(stat_result)
+    }
+
+    async fn request(
+        &self,
+        path: &str,
+        key: Option<CacheKey>,
+        request: VfsRequest,
+    ) -> VfsResult<VfsValue> {
+        if let Some(key) = &key
+            && matches!(self.policy, CachePolicy::Invalidated { .. })
+            && let Some(response) = self.cache.lock().await.get(key).cloned()
         {
             return response_value(response);
         }
@@ -115,10 +133,41 @@ impl RemoteVfs {
         let response = receiver
             .await
             .map_err(|_| VfsError::Io("VFS response channel was closed".into()))?;
-        if response_is_cacheable(self.policy, &response)
-            && generation == self.generation.load(Ordering::Acquire)
-        {
-            self.cache.lock().await.insert(key, response.clone());
+        if response.invalidate {
+            self.invalidate(Some(path)).await;
+        } else if generation == self.generation.load(Ordering::Acquire) {
+            let mut cache = self.cache.lock().await;
+            if let Some(stat) = &response.stat {
+                let stat_response = response_from_stat(stat.clone());
+                if response_is_cacheable(self.policy, &stat_response) {
+                    cache.insert(CacheKey::Stat(path.to_owned()), stat_response);
+                }
+            }
+            if matches!(self.policy, CachePolicy::Invalidated { .. })
+                && let Some(VfsValue::Entries(entries)) = &response.value
+            {
+                for entry in entries {
+                    let child = if path == "/" {
+                        format!("/{}", entry.name)
+                    } else {
+                        format!("{}/{}", path.trim_end_matches('/'), entry.name)
+                    };
+                    cache.insert(
+                        CacheKey::Stat(child),
+                        VfsResponse {
+                            value: Some(VfsValue::Metadata(entry.metadata.clone())),
+                            error: None,
+                            stat: None,
+                            invalidate: false,
+                        },
+                    );
+                }
+            }
+            if let Some(key) = key
+                && response_is_cacheable(self.policy, &response)
+            {
+                cache.insert(key, response.clone());
+            }
         }
         response_value(response)
     }
@@ -147,8 +196,16 @@ fn is_same_or_descendant(candidate: &str, path: &str) -> bool {
 impl VfsStorage for RemoteVfs {
     async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
         let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
         match self
-            .request(CacheKey::Read(path.clone()), VfsRequest::Read { path })
+            .request(
+                &path,
+                Some(CacheKey::Read(path.clone())),
+                VfsRequest::Read {
+                    path: path.clone(),
+                    stat,
+                },
+            )
             .await?
         {
             VfsValue::Bytes(bytes) => Ok(bytes),
@@ -167,20 +224,60 @@ impl VfsStorage for RemoteVfs {
         Ok(bytes[start..bytes.len().min(start.saturating_add(length))].to_vec())
     }
 
-    async fn write(&self, path: &str, _data: &[u8]) -> VfsResult<()> {
-        Err(readonly(path))
+    async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        self.write_request(path, data, None).await
     }
 
-    async fn write_at(&self, path: &str, _offset: u64, _data: &[u8]) -> VfsResult<()> {
-        Err(readonly(path))
+    async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
+        self.write_request(path, data, Some(offset)).await
     }
 
-    async fn set_size(&self, path: &str, _size: u64) -> VfsResult<()> {
-        Err(readonly(path))
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
+        match self
+            .request(
+                &path,
+                None,
+                VfsRequest::Append {
+                    path: path.clone(),
+                    data: data.to_vec(),
+                    stat,
+                },
+            )
+            .await?
+        {
+            VfsValue::Unit => Ok(()),
+            _ => Err(VfsError::Io(
+                "VFS append returned the wrong value type".into(),
+            )),
+        }
+    }
+
+    async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
+        let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
+        match self
+            .request(
+                &path,
+                None,
+                VfsRequest::Truncate {
+                    path: path.clone(),
+                    size,
+                    stat,
+                },
+            )
+            .await?
+        {
+            VfsValue::Unit => Ok(()),
+            _ => Err(VfsError::Io(
+                "VFS truncate returned the wrong value type".into(),
+            )),
+        }
     }
 
     async fn delete(&self, path: &str) -> VfsResult<()> {
-        Err(readonly(path))
+        self.delete_request(path, false).await
     }
 
     async fn exists(&self, path: &str) -> VfsResult<bool> {
@@ -193,8 +290,16 @@ impl VfsStorage for RemoteVfs {
 
     async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
         let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
         match self
-            .request(CacheKey::List(path.clone()), VfsRequest::List { path })
+            .request(
+                &path,
+                Some(CacheKey::List(path.clone())),
+                VfsRequest::List {
+                    path: path.clone(),
+                    stat,
+                },
+            )
             .await?
         {
             VfsValue::Entries(entries) => Ok(entries
@@ -213,7 +318,11 @@ impl VfsStorage for RemoteVfs {
     async fn stat(&self, path: &str) -> VfsResult<Metadata> {
         let path = normalize_path(path);
         match self
-            .request(CacheKey::Stat(path.clone()), VfsRequest::Stat { path })
+            .request(
+                &path,
+                Some(CacheKey::Stat(path.clone())),
+                VfsRequest::Stat { path: path.clone() },
+            )
             .await?
         {
             VfsValue::Metadata(value) => Ok(metadata(value)),
@@ -224,22 +333,110 @@ impl VfsStorage for RemoteVfs {
     }
 
     async fn mkdir(&self, path: &str) -> VfsResult<()> {
-        Err(readonly(path))
+        let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
+        let value = self
+            .request(
+                &path,
+                None,
+                VfsRequest::Mkdir {
+                    path: path.clone(),
+                    stat,
+                },
+            )
+            .await?;
+        match value {
+            VfsValue::Unit => Ok(()),
+            _ => Err(VfsError::Io(
+                "VFS mkdir returned the wrong value type".into(),
+            )),
+        }
     }
 
     async fn rmdir(&self, path: &str) -> VfsResult<()> {
-        Err(readonly(path))
+        self.delete_request(path, true).await
     }
 
-    async fn rename(&self, from: &str, _to: &str) -> VfsResult<()> {
-        Err(readonly(from))
+    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
+        let from = normalize_path(from);
+        let to = normalize_path(to);
+        let stat = self.cached_stat(&from).await;
+        let to_stat = self.cached_stat(&to).await;
+        let value = self
+            .request(
+                &from,
+                None,
+                VfsRequest::Rename {
+                    from: from.clone(),
+                    to: to.clone(),
+                    stat,
+                    to_stat,
+                },
+            )
+            .await?;
+        self.invalidate(Some(&to)).await;
+        match value {
+            VfsValue::Unit => Ok(()),
+            _ => Err(VfsError::Io(
+                "VFS rename returned the wrong value type".into(),
+            )),
+        }
     }
 
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
         if normalize_path(path) == "/" {
             Ok(())
         } else {
-            Err(readonly(path))
+            Err(VfsError::PermissionDenied(format!(
+                "synchronous directory creation is unavailable: {path}"
+            )))
+        }
+    }
+}
+
+impl RemoteVfs {
+    async fn write_request(&self, path: &str, data: &[u8], offset: Option<u64>) -> VfsResult<()> {
+        let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
+        let value = self
+            .request(
+                &path,
+                None,
+                VfsRequest::Write {
+                    path: path.clone(),
+                    data: data.to_vec(),
+                    offset,
+                    stat,
+                },
+            )
+            .await?;
+        match value {
+            VfsValue::Unit => Ok(()),
+            _ => Err(VfsError::Io(
+                "VFS write returned the wrong value type".into(),
+            )),
+        }
+    }
+
+    async fn delete_request(&self, path: &str, directory: bool) -> VfsResult<()> {
+        let path = normalize_path(path);
+        let stat = self.cached_stat(&path).await;
+        let value = self
+            .request(
+                &path,
+                None,
+                VfsRequest::Delete {
+                    path: path.clone(),
+                    directory,
+                    stat,
+                },
+            )
+            .await?;
+        match value {
+            VfsValue::Unit => Ok(()),
+            _ => Err(VfsError::Io(
+                "VFS delete returned the wrong value type".into(),
+            )),
         }
     }
 }
@@ -249,6 +446,8 @@ fn metadata(value: pysandbox_protocol::VfsMetadata) -> Metadata {
     Metadata {
         is_dir: value.kind == pysandbox_protocol::VfsNodeKind::Directory,
         size: value.size,
+        readable: value.read,
+        writable: value.write,
         created: now,
         modified: now,
         accessed: now,
@@ -258,8 +457,10 @@ fn metadata(value: pysandbox_protocol::VfsMetadata) -> Metadata {
 fn protocol_error(code: VfsErrorCode, message: String) -> VfsError {
     match code {
         VfsErrorCode::NotFound => VfsError::NotFound(message),
+        VfsErrorCode::AlreadyExists => VfsError::AlreadyExists(message),
         VfsErrorCode::NotDirectory => VfsError::NotDirectory(message),
         VfsErrorCode::IsDirectory => VfsError::NotFile(message),
+        VfsErrorCode::DirectoryNotEmpty => VfsError::DirectoryNotEmpty(message),
         VfsErrorCode::PermissionDenied => VfsError::PermissionDenied(message),
         VfsErrorCode::Invalid => VfsError::InvalidPath(message),
         VfsErrorCode::Io => VfsError::Io(message),
@@ -274,8 +475,33 @@ fn response_value(response: VfsResponse) -> VfsResult<VfsValue> {
     }
 }
 
-fn readonly(path: &str) -> VfsError {
-    VfsError::PermissionDenied(format!("read-only virtual filesystem: {path}"))
+fn stat_result(response: &VfsResponse) -> VfsStatResult {
+    match (&response.value, &response.error) {
+        (Some(VfsValue::Metadata(value)), None) => VfsStatResult {
+            value: Some(value.clone()),
+            error: None,
+        },
+        (None, Some(error)) => VfsStatResult {
+            value: None,
+            error: Some(error.clone()),
+        },
+        _ => VfsStatResult {
+            value: None,
+            error: Some(pysandbox_protocol::VfsError {
+                code: VfsErrorCode::Io,
+                message: "malformed cached VFS stat".into(),
+            }),
+        },
+    }
+}
+
+fn response_from_stat(stat: VfsStatResult) -> VfsResponse {
+    VfsResponse {
+        value: stat.value.map(VfsValue::Metadata),
+        error: stat.error,
+        stat: None,
+        invalidate: false,
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -318,6 +544,8 @@ mod tests {
                 code,
                 message: "test".into(),
             }),
+            stat: None,
+            invalidate: false,
         }
     }
 
@@ -327,12 +555,18 @@ mod tests {
             value: Some(VfsValue::Metadata(VfsMetadata {
                 kind: VfsNodeKind::File,
                 size: 1,
+                read: true,
+                write: false,
             })),
             error: None,
+            stat: None,
+            invalidate: false,
         };
         let malformed = VfsResponse {
             value: None,
             error: None,
+            stat: None,
+            invalidate: false,
         };
         let positive_only = CachePolicy::Invalidated { negative: false };
         let with_negative = CachePolicy::Invalidated { negative: true };

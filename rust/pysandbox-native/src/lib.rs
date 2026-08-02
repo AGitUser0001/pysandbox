@@ -10,15 +10,18 @@ use interprocess::local_socket::{
     GenericFilePath, GenericNamespaced, ToFsName, ToNsName,
     tokio::{Stream, prelude::*},
 };
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyFileExistsError, PyIsADirectoryError, PyNotADirectoryError, PyPermissionError,
+    PyRuntimeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pysandbox_protocol::{
     CancelRequest, ControlResult, DEFAULT_MAX_FRAME_BYTES, ExecuteRequest, ExecuteResult,
     ExecutionControl, ExecutionLimits, Frame, FrameKind, FuelOperation, InvalidateVfs,
     OutputPayload, OutputSource, RpcCall, RpcResult, TerminationReason, VfsDirectoryEntry,
-    VfsError, VfsErrorCode, VfsMetadata, VfsNodeKind, VfsRequest, VfsResponse, VfsValue,
-    WorkerRpcCall, decode_payload, encode_payload, read_frame, write_frame,
+    VfsError, VfsErrorCode, VfsMetadata, VfsNodeKind, VfsRequest, VfsResponse, VfsStatResult,
+    VfsValue, WorkerRpcCall, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -998,22 +1001,15 @@ async fn dispatch_vfs_request(
     handler: &VfsHandler,
 ) {
     let response = match decode_payload::<VfsRequest>(&frame.payload) {
-        Ok(call) => match invoke_vfs_handler(handler, call).await {
-            Ok(value) => VfsResponse {
-                value: Some(value),
-                error: None,
-            },
-            Err(error) => VfsResponse {
-                value: None,
-                error: Some(error),
-            },
-        },
+        Ok(call) => invoke_vfs_handler(handler, call).await,
         Err(error) => VfsResponse {
             value: None,
             error: Some(VfsError {
                 code: VfsErrorCode::Invalid,
                 message: error.to_string(),
             }),
+            stat: None,
+            invalidate: false,
         },
     };
     let Ok(payload) = encode_payload(&response) else {
@@ -1054,21 +1050,272 @@ fn host_dispatch_error_response(request: HostDispatchRequest, message: &str) -> 
                     code: VfsErrorCode::Io,
                     message: message.into(),
                 }),
+                stat: None,
+                invalidate: false,
             })
             .expect("VFS overload response must encode"),
         ),
     }
 }
 
-async fn invoke_vfs_handler(
+async fn invoke_vfs_handler(handler: &VfsHandler, request: VfsRequest) -> VfsResponse {
+    match request {
+        VfsRequest::Stat { path } => match call_vfs_path_method(handler, "stat", &path).await {
+            Ok(value) => match Python::attach(|py| extract_vfs_metadata(value.bind(py))) {
+                Ok(value) => vfs_success(VfsValue::Metadata(value), None, false),
+                Err(error) => vfs_failure(vfs_python_error(error), None),
+            },
+            Err(error) => vfs_failure(error, None),
+        },
+        VfsRequest::Read { path, stat } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            let metadata = match stat_value(&stat) {
+                Ok(metadata) => metadata,
+                Err(error) => return vfs_failure(error, Some(stat)),
+            };
+            if !metadata.read {
+                return vfs_failure(permission_denied(&path, "read"), Some(stat));
+            }
+            if metadata.kind == VfsNodeKind::Directory {
+                return vfs_failure(is_directory(&path), Some(stat));
+            }
+            match call_vfs_path_method(handler, "read", &path).await {
+                Ok(value) => match Python::attach(|py| value.bind(py).extract::<Vec<u8>>()) {
+                    Ok(value) => vfs_success(VfsValue::Bytes(value), Some(stat), false),
+                    Err(error) => vfs_failure(vfs_python_error(error), Some(stat)),
+                },
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+        VfsRequest::Write {
+            path,
+            data,
+            offset,
+            stat,
+        } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            if let Ok(metadata) = stat_value(&stat) {
+                if !metadata.write {
+                    return vfs_failure(permission_denied(&path, "write"), Some(stat));
+                }
+                if metadata.kind == VfsNodeKind::Directory {
+                    return vfs_failure(is_directory(&path), Some(stat));
+                }
+            } else if matches!(
+                &stat.error,
+                Some(VfsError {
+                    code: VfsErrorCode::NotFound,
+                    ..
+                })
+            ) {
+                let parent = vfs_parent_path(&path);
+                let parent_stat = resolve_vfs_stat(handler, &parent, None).await;
+                let parent_metadata = match stat_value(&parent_stat) {
+                    Ok(metadata) => metadata,
+                    Err(error) => return vfs_failure(error, Some(stat)),
+                };
+                if parent_metadata.kind != VfsNodeKind::Directory {
+                    return vfs_failure(not_directory(&parent), Some(stat));
+                }
+                if !parent_metadata.write {
+                    return vfs_failure(permission_denied(&parent, "write"), Some(stat));
+                }
+            } else {
+                let error = stat.error.clone().expect("invalid VFS stat result");
+                return vfs_failure(error, Some(stat));
+            }
+            match call_vfs_write_method(handler, &path, &data, offset).await {
+                Ok(()) => vfs_success(VfsValue::Unit, None, true),
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+        VfsRequest::Append { path, data, stat } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            let metadata = match stat_value(&stat) {
+                Ok(metadata) => metadata,
+                Err(error) => return vfs_failure(error, Some(stat)),
+            };
+            if !metadata.write {
+                return vfs_failure(permission_denied(&path, "write"), Some(stat));
+            }
+            if metadata.kind == VfsNodeKind::Directory {
+                return vfs_failure(is_directory(&path), Some(stat));
+            }
+            match call_vfs_append_method(handler, &path, &data, metadata.size).await {
+                Ok(()) => vfs_success(VfsValue::Unit, None, true),
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+        VfsRequest::Truncate { path, size, stat } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            let metadata = match stat_value(&stat) {
+                Ok(metadata) => metadata,
+                Err(error) => return vfs_failure(error, Some(stat)),
+            };
+            if metadata.kind == VfsNodeKind::Directory {
+                return vfs_failure(is_directory(&path), Some(stat));
+            }
+            if !metadata.write {
+                return vfs_failure(permission_denied(&path, "write"), Some(stat));
+            }
+            let result = if vfs_has_method(handler, "truncate") {
+                call_vfs_truncate_method(handler, &path, size).await
+            } else if !metadata.read {
+                Err(permission_denied(&path, "read for truncate fallback"))
+            } else {
+                truncate_vfs_file(handler, &path, size).await
+            };
+            match result {
+                Ok(()) => vfs_success(VfsValue::Unit, None, true),
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+        VfsRequest::Delete {
+            path,
+            directory,
+            stat,
+        } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            let metadata = match stat_value(&stat) {
+                Ok(metadata) => metadata,
+                Err(error) => return vfs_failure(error, Some(stat)),
+            };
+            if directory != (metadata.kind == VfsNodeKind::Directory) {
+                let error = if directory {
+                    not_directory(&path)
+                } else {
+                    is_directory(&path)
+                };
+                return vfs_failure(error, Some(stat));
+            }
+            if let Err(error) = require_writable_parent(handler, &path).await {
+                return vfs_failure(error, Some(stat));
+            }
+            match call_vfs_path_mutation(handler, "delete", &path).await {
+                Ok(()) => vfs_success(VfsValue::Unit, None, true),
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+        VfsRequest::Mkdir { path, stat } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            if stat_value(&stat).is_ok() {
+                return vfs_failure(already_exists(&path), Some(stat));
+            }
+            if !matches!(stat.error.as_ref(), Some(error) if error.code == VfsErrorCode::NotFound) {
+                let error = stat.error.clone().unwrap_or_else(|| malformed_vfs_stat());
+                return vfs_failure(error, Some(stat));
+            }
+            if let Err(error) = require_writable_parent(handler, &path).await {
+                return vfs_failure(error, Some(stat));
+            }
+            match call_vfs_path_mutation(handler, "mkdir", &path).await {
+                Ok(()) => vfs_success(VfsValue::Unit, None, true),
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+        VfsRequest::Rename {
+            from,
+            to,
+            stat,
+            to_stat,
+        } => invoke_vfs_rename(handler, from, to, stat, to_stat).await,
+        VfsRequest::List { path, stat } => {
+            let stat = resolve_vfs_stat(handler, &path, stat).await;
+            let metadata = match stat_value(&stat) {
+                Ok(metadata) => metadata,
+                Err(error) => return vfs_failure(error, Some(stat)),
+            };
+            if !metadata.read {
+                return vfs_failure(permission_denied(&path, "read"), Some(stat));
+            }
+            if metadata.kind != VfsNodeKind::Directory {
+                return vfs_failure(not_directory(&path), Some(stat));
+            }
+            match call_vfs_path_method(handler, "list", &path).await {
+                Ok(value) => {
+                    let entries = Python::attach(|py| {
+                        value
+                            .bind(py)
+                            .try_iter()?
+                            .map(|entry| {
+                                let entry = entry?;
+                                Ok(VfsDirectoryEntry {
+                                    name: entry.getattr("name")?.extract()?,
+                                    metadata: extract_vfs_metadata(&entry)?,
+                                })
+                            })
+                            .collect::<PyResult<Vec<_>>>()
+                    });
+                    match entries {
+                        Ok(entries) => vfs_success(VfsValue::Entries(entries), Some(stat), false),
+                        Err(error) => vfs_failure(vfs_python_error(error), Some(stat)),
+                    }
+                }
+                Err(error) => vfs_failure(error, Some(stat)),
+            }
+        }
+    }
+}
+
+async fn resolve_vfs_stat(
     handler: &VfsHandler,
-    request: VfsRequest,
-) -> Result<VfsValue, VfsError> {
-    let (method, path) = match &request {
-        VfsRequest::Stat { path } => ("stat", path),
-        VfsRequest::Read { path } => ("read", path),
-        VfsRequest::List { path } => ("list", path),
-    };
+    path: &str,
+    cached: Option<VfsStatResult>,
+) -> VfsStatResult {
+    if let Some(cached) = cached {
+        return cached;
+    }
+    match call_vfs_path_method(handler, "stat", path).await {
+        Ok(value) => match Python::attach(|py| extract_vfs_metadata(value.bind(py))) {
+            Ok(value) => VfsStatResult {
+                value: Some(value),
+                error: None,
+            },
+            Err(error) => VfsStatResult {
+                value: None,
+                error: Some(vfs_python_error(error)),
+            },
+        },
+        Err(error) => VfsStatResult {
+            value: None,
+            error: Some(error),
+        },
+    }
+}
+
+fn stat_value(stat: &VfsStatResult) -> Result<&VfsMetadata, VfsError> {
+    match (&stat.value, &stat.error) {
+        (Some(value), None) => Ok(value),
+        (None, Some(error)) => Err(error.clone()),
+        _ => Err(malformed_vfs_stat()),
+    }
+}
+
+fn malformed_vfs_stat() -> VfsError {
+    VfsError {
+        code: VfsErrorCode::Io,
+        message: "malformed VFS stat result".into(),
+    }
+}
+
+async fn require_writable_parent(handler: &VfsHandler, path: &str) -> Result<(), VfsError> {
+    let parent = vfs_parent_path(path);
+    let stat = resolve_vfs_stat(handler, &parent, None).await;
+    let metadata = stat_value(&stat)?;
+    if metadata.kind != VfsNodeKind::Directory {
+        return Err(not_directory(&parent));
+    }
+    if !metadata.write {
+        return Err(permission_denied(&parent, "write"));
+    }
+    Ok(())
+}
+
+async fn call_vfs_path_method(
+    handler: &VfsHandler,
+    method: &str,
+    path: &str,
+) -> Result<Py<PyAny>, VfsError> {
     let (handler, locals) = Python::attach(|py| {
         let handler = handler.lock().expect("VFS handler lock poisoned");
         let handler = handler.as_ref().ok_or_else(|| VfsError {
@@ -1098,25 +1345,295 @@ async fn invoke_vfs_handler(
         invocation.0
     };
 
-    Python::attach(|py| match request {
-        VfsRequest::Read { .. } => value.bind(py).extract::<Vec<u8>>().map(VfsValue::Bytes),
-        VfsRequest::Stat { .. } => extract_vfs_metadata(value.bind(py)).map(VfsValue::Metadata),
-        VfsRequest::List { .. } => {
-            let entries = value
-                .bind(py)
-                .try_iter()?
-                .map(|entry| {
-                    let entry = entry?;
-                    Ok(VfsDirectoryEntry {
-                        name: entry.getattr("name")?.extract()?,
-                        metadata: extract_vfs_metadata(&entry)?,
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            Ok(VfsValue::Entries(entries))
-        }
+    Ok(value)
+}
+
+async fn call_vfs_write_method(
+    handler: &VfsHandler,
+    path: &str,
+    data: &[u8],
+    offset: Option<u64>,
+) -> Result<(), VfsError> {
+    let (handler, locals) = Python::attach(|py| {
+        let handler = handler.lock().expect("VFS handler lock poisoned");
+        let handler = handler.as_ref().ok_or_else(|| VfsError {
+            code: VfsErrorCode::NotFound,
+            message: format!("virtual path not found: {path}"),
+        })?;
+        Ok::<_, VfsError>((handler.callable.clone_ref(py), handler.locals.clone()))
+    })?;
+    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
+        let result = handler
+            .bind(py)
+            .call_method1("write", (path, data, offset))?;
+        let is_awaitable = py
+            .import("inspect")?
+            .call_method1("isawaitable", (&result,))?
+            .is_truthy()?;
+        Ok((result.unbind(), is_awaitable))
     })
-    .map_err(vfs_python_error)
+    .map_err(vfs_python_error)?;
+    if invocation.1 {
+        let future = Python::attach(|py| {
+            pyo3_async_runtimes::into_future_with_locals(&locals, invocation.0.bind(py).clone())
+        })
+        .map_err(vfs_python_error)?;
+        future.await.map_err(vfs_python_error)?;
+    }
+    Ok(())
+}
+
+async fn call_vfs_append_method(
+    handler: &VfsHandler,
+    path: &str,
+    data: &[u8],
+    offset: u64,
+) -> Result<(), VfsError> {
+    let (handler, locals) = Python::attach(|py| {
+        let handler = handler.lock().expect("VFS handler lock poisoned");
+        let handler = handler.as_ref().ok_or_else(|| VfsError {
+            code: VfsErrorCode::NotFound,
+            message: format!("virtual path not found: {path}"),
+        })?;
+        Ok::<_, VfsError>((handler.callable.clone_ref(py), handler.locals.clone()))
+    })?;
+    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
+        let handler = handler.bind(py);
+        let result = if handler.hasattr("append")? {
+            handler.call_method1("append", (path, data))?
+        } else {
+            handler.call_method1("write", (path, data, Some(offset)))?
+        };
+        let is_awaitable = py
+            .import("inspect")?
+            .call_method1("isawaitable", (&result,))?
+            .is_truthy()?;
+        Ok((result.unbind(), is_awaitable))
+    })
+    .map_err(vfs_python_error)?;
+    if invocation.1 {
+        let future = Python::attach(|py| {
+            pyo3_async_runtimes::into_future_with_locals(&locals, invocation.0.bind(py).clone())
+        })
+        .map_err(vfs_python_error)?;
+        future.await.map_err(vfs_python_error)?;
+    }
+    Ok(())
+}
+
+fn vfs_has_method(handler: &VfsHandler, method: &str) -> bool {
+    Python::attach(|py| {
+        let handler = handler.lock().expect("VFS handler lock poisoned");
+        handler
+            .as_ref()
+            .is_some_and(|handler| handler.callable.bind(py).hasattr(method).unwrap_or(false))
+    })
+}
+
+async fn call_vfs_path_mutation(
+    handler: &VfsHandler,
+    method: &str,
+    path: &str,
+) -> Result<(), VfsError> {
+    call_vfs_path_method(handler, method, path)
+        .await
+        .map(|_| ())
+}
+
+async fn call_vfs_truncate_method(
+    handler: &VfsHandler,
+    path: &str,
+    size: u64,
+) -> Result<(), VfsError> {
+    let (callable, locals) = vfs_callable(handler, path)?;
+    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
+        let result = callable.bind(py).call_method1("truncate", (path, size))?;
+        invocation_result(py, result)
+    })
+    .map_err(vfs_python_error)?;
+    await_vfs_invocation(locals, invocation).await.map(|_| ())
+}
+
+async fn call_vfs_rename_method(
+    handler: &VfsHandler,
+    from: &str,
+    to: &str,
+) -> Result<(), VfsError> {
+    let (callable, locals) = vfs_callable(handler, from)?;
+    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
+        let result = callable.bind(py).call_method1("rename", (from, to))?;
+        invocation_result(py, result)
+    })
+    .map_err(vfs_python_error)?;
+    await_vfs_invocation(locals, invocation).await.map(|_| ())
+}
+
+fn vfs_callable(
+    handler: &VfsHandler,
+    path: &str,
+) -> Result<(Py<PyAny>, pyo3_async_runtimes::TaskLocals), VfsError> {
+    Python::attach(|py| {
+        let handler = handler.lock().expect("VFS handler lock poisoned");
+        let handler = handler.as_ref().ok_or_else(|| VfsError {
+            code: VfsErrorCode::NotFound,
+            message: format!("virtual path not found: {path}"),
+        })?;
+        Ok((handler.callable.clone_ref(py), handler.locals.clone()))
+    })
+}
+
+fn invocation_result(py: Python<'_>, result: Bound<'_, PyAny>) -> PyResult<(Py<PyAny>, bool)> {
+    let is_awaitable = py
+        .import("inspect")?
+        .call_method1("isawaitable", (&result,))?
+        .is_truthy()?;
+    Ok((result.unbind(), is_awaitable))
+}
+
+async fn await_vfs_invocation(
+    locals: pyo3_async_runtimes::TaskLocals,
+    invocation: (Py<PyAny>, bool),
+) -> Result<Py<PyAny>, VfsError> {
+    if !invocation.1 {
+        return Ok(invocation.0);
+    }
+    let future = Python::attach(|py| {
+        pyo3_async_runtimes::into_future_with_locals(&locals, invocation.0.bind(py).clone())
+    })
+    .map_err(vfs_python_error)?;
+    future.await.map_err(vfs_python_error)
+}
+
+async fn read_vfs_bytes(handler: &VfsHandler, path: &str) -> Result<Vec<u8>, VfsError> {
+    let value = call_vfs_path_method(handler, "read", path).await?;
+    Python::attach(|py| value.bind(py).extract::<Vec<u8>>()).map_err(vfs_python_error)
+}
+
+async fn truncate_vfs_file(handler: &VfsHandler, path: &str, size: u64) -> Result<(), VfsError> {
+    let size = usize::try_from(size).map_err(|_| VfsError {
+        code: VfsErrorCode::Invalid,
+        message: format!("truncate size is too large: {size}"),
+    })?;
+    let mut data = read_vfs_bytes(handler, path).await?;
+    data.resize(size, 0);
+    call_vfs_write_method(handler, path, &data, None).await
+}
+
+async fn invoke_vfs_rename(
+    handler: &VfsHandler,
+    from: String,
+    to: String,
+    stat: Option<VfsStatResult>,
+    to_stat: Option<VfsStatResult>,
+) -> VfsResponse {
+    let stat = resolve_vfs_stat(handler, &from, stat).await;
+    let metadata = match stat_value(&stat) {
+        Ok(metadata) => metadata.clone(),
+        Err(error) => return vfs_failure(error, Some(stat)),
+    };
+    if from == to {
+        return vfs_success(VfsValue::Unit, None, false);
+    }
+    if let Err(error) = require_writable_parent(handler, &from).await {
+        return vfs_failure(error, Some(stat));
+    }
+    if let Err(error) = require_writable_parent(handler, &to).await {
+        return vfs_failure(error, Some(stat));
+    }
+
+    let result = if vfs_has_method(handler, "rename") {
+        call_vfs_rename_method(handler, &from, &to).await
+    } else if metadata.kind == VfsNodeKind::Directory {
+        Err(VfsError {
+            code: VfsErrorCode::PermissionDenied,
+            message: format!("directory rename requires a VFS rename method: {from}"),
+        })
+    } else if !metadata.read {
+        Err(permission_denied(&from, "read for rename fallback"))
+    } else {
+        let to_stat = resolve_vfs_stat(handler, &to, to_stat).await;
+        let destination_allowed = match stat_value(&to_stat) {
+            Ok(destination) if destination.kind == VfsNodeKind::Directory => Err(is_directory(&to)),
+            Ok(destination) if !destination.write => Err(permission_denied(&to, "write")),
+            Ok(_) => Ok(()),
+            Err(error) if error.code == VfsErrorCode::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+        match destination_allowed {
+            Err(error) => Err(error),
+            Ok(()) => match read_vfs_bytes(handler, &from).await {
+                Ok(data) => match call_vfs_write_method(handler, &to, &data, None).await {
+                    Ok(()) => call_vfs_path_mutation(handler, "delete", &from).await,
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            },
+        }
+    };
+
+    match result {
+        Ok(()) => vfs_success(VfsValue::Unit, None, true),
+        Err(error) => vfs_failure(error, Some(stat)),
+    }
+}
+
+fn vfs_success(value: VfsValue, stat: Option<VfsStatResult>, invalidate: bool) -> VfsResponse {
+    VfsResponse {
+        value: Some(value),
+        error: None,
+        stat,
+        invalidate,
+    }
+}
+
+fn vfs_failure(error: VfsError, stat: Option<VfsStatResult>) -> VfsResponse {
+    VfsResponse {
+        value: None,
+        error: Some(error),
+        stat,
+        invalidate: false,
+    }
+}
+
+fn permission_denied(path: &str, operation: &str) -> VfsError {
+    VfsError {
+        code: VfsErrorCode::PermissionDenied,
+        message: format!("{operation} permission denied: {path}"),
+    }
+}
+
+fn is_directory(path: &str) -> VfsError {
+    VfsError {
+        code: VfsErrorCode::IsDirectory,
+        message: format!("path is a directory: {path}"),
+    }
+}
+
+fn already_exists(path: &str) -> VfsError {
+    VfsError {
+        code: VfsErrorCode::AlreadyExists,
+        message: format!("path already exists: {path}"),
+    }
+}
+
+fn not_directory(path: &str) -> VfsError {
+    VfsError {
+        code: VfsErrorCode::NotDirectory,
+        message: format!("path is not a directory: {path}"),
+    }
+}
+
+fn vfs_parent_path(path: &str) -> String {
+    path.rsplit_once('/').map_or_else(
+        || "/".into(),
+        |(parent, _)| {
+            if parent.is_empty() {
+                "/".into()
+            } else {
+                parent.into()
+            }
+        },
+    )
 }
 
 fn extract_vfs_metadata(value: &Bound<'_, PyAny>) -> PyResult<VfsMetadata> {
@@ -1133,6 +1650,8 @@ fn extract_vfs_metadata(value: &Bound<'_, PyAny>) -> PyResult<VfsMetadata> {
     Ok(VfsMetadata {
         kind,
         size: value.getattr("size")?.extract()?,
+        read: value.getattr("read")?.extract()?,
+        write: value.getattr("write")?.extract()?,
     })
 }
 
@@ -1140,11 +1659,13 @@ fn vfs_python_error(error: PyErr) -> VfsError {
     Python::attach(|py| {
         let code = if error.is_instance_of::<pyo3::exceptions::PyFileNotFoundError>(py) {
             VfsErrorCode::NotFound
-        } else if error.is_instance_of::<pyo3::exceptions::PyNotADirectoryError>(py) {
+        } else if error.is_instance_of::<PyFileExistsError>(py) {
+            VfsErrorCode::AlreadyExists
+        } else if error.is_instance_of::<PyNotADirectoryError>(py) {
             VfsErrorCode::NotDirectory
-        } else if error.is_instance_of::<pyo3::exceptions::PyIsADirectoryError>(py) {
+        } else if error.is_instance_of::<PyIsADirectoryError>(py) {
             VfsErrorCode::IsDirectory
-        } else if error.is_instance_of::<pyo3::exceptions::PyPermissionError>(py) {
+        } else if error.is_instance_of::<PyPermissionError>(py) {
             VfsErrorCode::PermissionDenied
         } else if error.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
             VfsErrorCode::Invalid

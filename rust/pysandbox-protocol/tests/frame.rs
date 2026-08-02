@@ -31,6 +31,7 @@ fn frames_round_trip_with_an_opaque_byte_string_payload() {
 fn vfs_requests_preserve_paths() {
     let request = VfsRequest::Read {
         path: "/packages/example.py".into(),
+        stat: None,
     };
     assert_eq!(
         decode_payload::<VfsRequest>(&encode_payload(&request).unwrap()).unwrap(),

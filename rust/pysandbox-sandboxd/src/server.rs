@@ -258,6 +258,8 @@ async fn serve_connection(
                                 code: pysandbox_protocol::VfsErrorCode::Io,
                                 message: error.to_string(),
                             }),
+                            stat: None,
+                            invalidate: false,
                         },
                     )
                     .await;

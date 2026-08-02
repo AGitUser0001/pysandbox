@@ -339,22 +339,13 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
                 .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
             rt.block_on(async {
-                // For append mode (position is None), get file size first
-                let write_position = match position {
-                    Some(pos) => pos,
-                    None => {
-                        // Get current file size to append at the end
-                        match storage.stat(&path).await {
-                            Ok(meta) => meta.size,
-                            // If file doesn't exist, start at 0
-                            Err(_) => 0,
-                        }
-                    }
-                };
-                storage
-                    .write_at(&path, write_position, &buffer_data)
-                    .await
-                    .map(|()| write_position)
+                match position {
+                    Some(write_position) => storage
+                        .write_at(&path, write_position, &buffer_data)
+                        .await
+                        .map(|()| Some(write_position + data_len)),
+                    None => storage.append(&path, &buffer_data).await.map(|()| None),
+                }
             })
             .map_err(|e| format!("VFS write failed: {:?}", e))
         })
@@ -362,9 +353,8 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
         .map_err(|_| StreamError::trap("Thread panicked during VFS write"))?;
 
         match result {
-            Ok(write_position) => {
-                // Update position for next write (converts append to positional after first write)
-                self.position = Some(write_position + data_len);
+            Ok(position) => {
+                self.position = position;
                 Ok(())
             }
             Err(e) => Err(StreamError::LastOperationFailed(wasmtime::Error::msg(

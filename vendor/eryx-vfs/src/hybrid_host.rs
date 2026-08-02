@@ -646,6 +646,12 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     if !meta.is_dir {
                         return Err(crate::VfsError::NotDirectory(full_path).into());
                     }
+                    if flags.contains(types::DescriptorFlags::READ) && !meta.readable {
+                        return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
+                    }
+                    if flags.contains(types::DescriptorFlags::WRITE) && !meta.writable {
+                        return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
+                    }
                     let new_vfs_desc =
                         VfsDescriptor::dir(full_path, vfs_desc.dir_perms, vfs_desc.file_perms);
                     let new_descriptor = HybridDescriptor::Vfs(new_vfs_desc);
@@ -664,7 +670,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         if !create {
                             return Err(crate::VfsError::NotFound(full_path).into());
                         }
-                        if !vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
+                        let parent_meta = self.ctx.storage.stat(&vfs_desc.path).await?;
+                        if !vfs_desc.dir_perms.contains(DirPerms::MUTATE) || !parent_meta.writable {
                             return Err(
                                 crate::VfsError::PermissionDenied("mutate".to_string()).into()
                             );
@@ -675,13 +682,17 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         if meta.is_dir {
                             return Err(crate::VfsError::NotFile(full_path).into());
                         }
+                        if file_perms.contains(FilePerms::READ) && !meta.readable {
+                            return Err(
+                                crate::VfsError::PermissionDenied("read".to_string()).into()
+                            );
+                        }
+                        if file_perms.contains(FilePerms::WRITE) && !meta.writable {
+                            return Err(
+                                crate::VfsError::PermissionDenied("write".to_string()).into()
+                            );
+                        }
                         if truncate {
-                            if !vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
-                                return Err(crate::VfsError::PermissionDenied(
-                                    "mutate".to_string(),
-                                )
-                                .into());
-                            }
                             self.ctx.storage.write(&full_path, &[]).await?;
                         }
                     }

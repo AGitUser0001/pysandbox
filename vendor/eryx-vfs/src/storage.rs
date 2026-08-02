@@ -16,6 +16,10 @@ pub struct Metadata {
     pub is_dir: bool,
     /// Size in bytes (0 for directories).
     pub size: u64,
+    /// Whether contents may be read or a directory may be listed.
+    pub readable: bool,
+    /// Whether contents or directory entries may be modified.
+    pub writable: bool,
     /// Creation time.
     pub created: SystemTime,
     /// Last modification time.
@@ -30,6 +34,8 @@ impl Default for Metadata {
         Self {
             is_dir: false,
             size: 0,
+            readable: true,
+            writable: true,
             created: now,
             modified: now,
             accessed: now,
@@ -63,6 +69,16 @@ pub trait VfsStorage: Send + Sync {
 
     /// Write at a specific offset, extending the file if necessary.
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()>;
+
+    /// Append to a file. Backends may override this to provide atomic append.
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        let offset = match self.stat(path).await {
+            Ok(metadata) => metadata.size,
+            Err(VfsError::NotFound(_)) => 0,
+            Err(error) => return Err(error),
+        };
+        self.write_at(path, offset, data).await
+    }
 
     /// Truncate or extend file to the given size.
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()>;
@@ -150,6 +166,10 @@ impl VfsStorage for ArcStorage {
 
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
         self.0.write_at(path, offset, data).await
+    }
+
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        self.0.append(path, data).await
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
@@ -455,6 +475,8 @@ impl VfsStorage for InMemoryStorage {
                         metadata: Metadata {
                             is_dir: false,
                             size: data.content.len() as u64,
+                            readable: true,
+                            writable: true,
                             created: data.created,
                             modified: data.modified,
                             accessed: data.accessed,
@@ -475,6 +497,8 @@ impl VfsStorage for InMemoryStorage {
                         metadata: Metadata {
                             is_dir: true,
                             size: 0,
+                            readable: true,
+                            writable: true,
                             created: now,
                             modified: now,
                             accessed: now,
@@ -497,6 +521,8 @@ impl VfsStorage for InMemoryStorage {
             return Ok(Metadata {
                 is_dir: false,
                 size: data.content.len() as u64,
+                readable: true,
+                writable: true,
                 created: data.created,
                 modified: data.modified,
                 accessed: data.accessed,
@@ -509,6 +535,8 @@ impl VfsStorage for InMemoryStorage {
             return Ok(Metadata {
                 is_dir: true,
                 size: 0,
+                readable: true,
+                writable: true,
                 created: now,
                 modified: now,
                 accessed: now,
