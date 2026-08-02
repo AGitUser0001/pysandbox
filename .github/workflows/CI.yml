@@ -155,6 +155,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wheels-${{ matrix.platform.name }}
+      - name: Cache Windows SDK and CRT
+        if: startsWith(matrix.platform.name, 'windows-')
+        uses: actions/cache@v5
+        with:
+          path: .xwin-cache
+          key: xwin-v17-${{ runner.os }}-${{ runner.arch }}
       - name: Install Windows cross-compilation tools
         if: startsWith(matrix.platform.name, 'windows-')
         run: |
@@ -170,6 +176,7 @@ jobs:
         env:
           MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
           PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
+          XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
         with:
           target: ${{ matrix.platform.target }}
           args: >-
@@ -355,8 +362,9 @@ jobs:
         shell: bash
         run: >-
           '${{ steps.python312.outputs.python312 }}'
-          -m pip install --pre --find-links dist
-          pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
+          -m pip install --pre
+          dist/*-cp312-cp312-*.whl
+          pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test installed wheel
         if: matrix.platform.regular
         working-directory: tests
@@ -369,8 +377,9 @@ jobs:
         shell: bash
         run: >-
           '${{ steps.python314t.outputs.python314t }}'
-          -m pip install --pre --find-links dist
-          pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
+          -m pip install --pre
+          dist/*-cp314-cp314t-*.whl
+          pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test free-threaded wheel
         if: matrix.platform.freethreaded
         working-directory: tests
