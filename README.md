@@ -18,7 +18,8 @@ pip install pysandbox-wasi
 ```
 
 For source builds, including builds that reuse the platform-independent
-component-runtime artifact, see [Building](CONTRIBUTING.md#building).
+component-runtime artifact, see
+[Building](https://github.com/AGitUser0001/pysandbox/blob/main/CONTRIBUTING.md#building).
 
 ## Demo
 
@@ -302,6 +303,7 @@ the application's asyncio loop. The subprocess shares its Wasmtime engine and
 compiled component while giving every worker an isolated Store, component
 instance, CPython state, memory, capabilities, limits, and output stream.
 
-See [DOCS.md](DOCS.md) for the complete architecture and
-[CONTRIBUTING.md](CONTRIBUTING.md) for development, testing, and build
-instructions.
+See [DOCS.md](https://github.com/AGitUser0001/pysandbox/blob/main/DOCS.md) for
+the complete architecture and
+[CONTRIBUTING.md](https://github.com/AGitUser0001/pysandbox/blob/main/CONTRIBUTING.md)
+for development, testing, and build instructions.

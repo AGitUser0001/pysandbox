@@ -135,7 +135,8 @@ sh component/build.sh
 - `vendor/`: pinned CPython, cbor2, and VFS sources
 - `tests/`: Python integration and regression tests
 
-See [DOCS.md](DOCS.md) for the runtime architecture.
+See [DOCS.md](https://github.com/AGitUser0001/pysandbox/blob/main/DOCS.md) for
+the runtime architecture.
 
 ## Releases
 
