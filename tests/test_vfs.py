@@ -1,4 +1,5 @@
 import asyncio
+import errno
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -8,10 +9,11 @@ from pysandbox import (
   RuntimeResult,
   VfsDirectoryEntry,
   VfsMetadata,
+  VirtualFileSystem,
 )
 
 
-class MemoryVfs:
+class MemoryVfs(VirtualFileSystem):
   def __init__(self) -> None:
     self.files = {"/hello.py": b"value = 42\n"}
     self.directories = {"/"}
@@ -65,14 +67,6 @@ class MemoryVfs:
     contents[offset:end] = data
     self.files[path] = bytes(contents)
 
-  async def append(self, path: str, data: bytes) -> None:
-    self.calls.append(("append", path))
-    if path not in self.files:
-      raise FileNotFoundError(path)
-    if path not in self.writable:
-      raise PermissionError(path)
-    self.files[path] += data
-
   async def delete(self, path: str) -> None:
     self.calls.append(("delete", path))
     if path in self.files:
@@ -83,7 +77,7 @@ class MemoryVfs:
       prefix = path.rstrip("/") + "/"
       entries = set(self.files) | self.directories
       if any(name != path and name.startswith(prefix) for name in entries):
-        raise OSError("directory not empty")
+        raise OSError(errno.ENOTEMPTY, "directory not empty", path)
       self.directories.remove(path)
       return
     raise FileNotFoundError(path)
@@ -105,7 +99,7 @@ class MemoryVfs:
     ]
 
 
-class DirectoryVfs:
+class DirectoryVfs(VirtualFileSystem):
   def __init__(self, root: Path) -> None:
     self.root = root.resolve()
 
@@ -150,6 +144,10 @@ class DirectoryVfs:
 
 
 class NativeMutationVfs(MemoryVfs):
+  async def append(self, path: str, data: bytes) -> None:
+    self.calls.append(("append", path))
+    self.files[path] += data
+
   async def truncate(self, path: str, size: int) -> None:
     self.calls.append(("truncate", path))
     data = self.files[path]
@@ -225,6 +223,50 @@ class TestVfs:
     finally:
       await runtime.close()
 
+  async def test_mutations_raise_standard_filesystem_errors(self) -> None:
+    vfs = MemoryVfs()
+    vfs.root_write = True
+    vfs.files["/file"] = b"data"
+    vfs.directories.update({"/directory", "/nonempty"})
+    vfs.files["/nonempty/child"] = b"data"
+    runtime = PythonRuntime(vfs=vfs, cache_vfs=True)
+    try:
+      result = await runtime.execute(
+        "import errno, os\n"
+        "try:\n"
+        "  os.mkdir('/directory')\n"
+        "except FileExistsError:\n"
+        "  pass\n"
+        "else:\n"
+        "  raise AssertionError('mkdir did not raise FileExistsError')\n"
+        "try:\n"
+        "  os.rmdir('/file')\n"
+        "except NotADirectoryError:\n"
+        "  pass\n"
+        "else:\n"
+        "  raise AssertionError('rmdir did not raise NotADirectoryError')\n"
+        "try:\n"
+        "  os.remove('/directory')\n"
+        "except IsADirectoryError:\n"
+        "  pass\n"
+        "else:\n"
+        "  raise AssertionError('remove did not raise IsADirectoryError')\n"
+        "try:\n"
+        "  os.rmdir('/nonempty')\n"
+        "except OSError as error:\n"
+        "  assert error.errno == errno.ENOTEMPTY, error\n"
+        "else:\n"
+        "  raise AssertionError('rmdir did not raise ENOTEMPTY')\n",
+      )
+      assert result.error is None, result.error
+
+      vfs.root_write = False
+      await runtime.invalidate_vfs("/")
+      denied = await runtime.execute("import os\nos.mkdir('/denied')")
+      assert "PermissionError" in (denied.error or "")
+    finally:
+      await runtime.close()
+
   async def test_write_permissions_append_and_cache_invalidation(self) -> None:
     vfs = MemoryVfs()
     vfs.root_write = True
@@ -250,7 +292,7 @@ class TestVfs:
       assert vfs.files["/editable.txt"] == b"aZc!"
       assert vfs.files["/created.txt"] == b"new"
       assert vfs.files["/write-only.txt"] == b"changed"
-      assert ("append", "/editable.txt") in vfs.calls
+      assert vfs.calls.count(("write", "/editable.txt")) >= 2
 
       vfs.root_write = False
       await runtime.invalidate_vfs("/")

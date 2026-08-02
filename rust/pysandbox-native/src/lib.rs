@@ -11,8 +11,8 @@ use interprocess::local_socket::{
     tokio::{Stream, prelude::*},
 };
 use pyo3::exceptions::{
-    PyFileExistsError, PyIsADirectoryError, PyNotADirectoryError, PyPermissionError,
-    PyRuntimeError, PyValueError,
+    PyAttributeError, PyFileExistsError, PyIsADirectoryError, PyNotADirectoryError,
+    PyNotImplementedError, PyPermissionError, PyRuntimeError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
@@ -1158,12 +1158,13 @@ async fn invoke_vfs_handler(handler: &VfsHandler, request: VfsRequest) -> VfsRes
             if !metadata.write {
                 return vfs_failure(permission_denied(&path, "write"), Some(stat));
             }
-            let result = if vfs_has_method(handler, "truncate") {
-                call_vfs_truncate_method(handler, &path, size).await
-            } else if !metadata.read {
-                Err(permission_denied(&path, "read for truncate fallback"))
-            } else {
-                truncate_vfs_file(handler, &path, size).await
+            let result = match call_vfs_truncate_method(handler, &path, size).await {
+                Ok(true) => Ok(()),
+                Ok(false) if !metadata.read => {
+                    Err(permission_denied(&path, "read for truncate fallback"))
+                }
+                Ok(false) => truncate_vfs_file(handler, &path, size).await,
+                Err(error) => Err(error),
             };
             match result {
                 Ok(()) => vfs_success(VfsValue::Unit, None, true),
@@ -1389,45 +1390,18 @@ async fn call_vfs_append_method(
     data: &[u8],
     offset: u64,
 ) -> Result<(), VfsError> {
-    let (handler, locals) = Python::attach(|py| {
-        let handler = handler.lock().expect("VFS handler lock poisoned");
-        let handler = handler.as_ref().ok_or_else(|| VfsError {
-            code: VfsErrorCode::NotFound,
-            message: format!("virtual path not found: {path}"),
-        })?;
-        Ok::<_, VfsError>((handler.callable.clone_ref(py), handler.locals.clone()))
+    let (callable, locals) = vfs_callable(handler, path)?;
+    let invocation = Python::attach(|py| {
+        optional_invocation(py, callable.bind(py).call_method1("append", (path, data)))
     })?;
-    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
-        let handler = handler.bind(py);
-        let result = if handler.hasattr("append")? {
-            handler.call_method1("append", (path, data))?
-        } else {
-            handler.call_method1("write", (path, data, Some(offset)))?
-        };
-        let is_awaitable = py
-            .import("inspect")?
-            .call_method1("isawaitable", (&result,))?
-            .is_truthy()?;
-        Ok((result.unbind(), is_awaitable))
-    })
-    .map_err(vfs_python_error)?;
-    if invocation.1 {
-        let future = Python::attach(|py| {
-            pyo3_async_runtimes::into_future_with_locals(&locals, invocation.0.bind(py).clone())
-        })
-        .map_err(vfs_python_error)?;
-        future.await.map_err(vfs_python_error)?;
+    if let Some(invocation) = invocation
+        && await_optional_vfs_invocation(locals, invocation)
+            .await?
+            .is_some()
+    {
+        return Ok(());
     }
-    Ok(())
-}
-
-fn vfs_has_method(handler: &VfsHandler, method: &str) -> bool {
-    Python::attach(|py| {
-        let handler = handler.lock().expect("VFS handler lock poisoned");
-        handler
-            .as_ref()
-            .is_some_and(|handler| handler.callable.bind(py).hasattr(method).unwrap_or(false))
-    })
+    call_vfs_write_method(handler, path, data, Some(offset)).await
 }
 
 async fn call_vfs_path_mutation(
@@ -1444,28 +1418,34 @@ async fn call_vfs_truncate_method(
     handler: &VfsHandler,
     path: &str,
     size: u64,
-) -> Result<(), VfsError> {
+) -> Result<bool, VfsError> {
     let (callable, locals) = vfs_callable(handler, path)?;
-    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
-        let result = callable.bind(py).call_method1("truncate", (path, size))?;
-        invocation_result(py, result)
-    })
-    .map_err(vfs_python_error)?;
-    await_vfs_invocation(locals, invocation).await.map(|_| ())
+    let invocation = Python::attach(|py| {
+        optional_invocation(py, callable.bind(py).call_method1("truncate", (path, size)))
+    })?;
+    match invocation {
+        Some(invocation) => await_optional_vfs_invocation(locals, invocation)
+            .await
+            .map(|value| value.is_some()),
+        None => Ok(false),
+    }
 }
 
 async fn call_vfs_rename_method(
     handler: &VfsHandler,
     from: &str,
     to: &str,
-) -> Result<(), VfsError> {
+) -> Result<bool, VfsError> {
     let (callable, locals) = vfs_callable(handler, from)?;
-    let invocation = Python::attach(|py| -> PyResult<(Py<PyAny>, bool)> {
-        let result = callable.bind(py).call_method1("rename", (from, to))?;
-        invocation_result(py, result)
-    })
-    .map_err(vfs_python_error)?;
-    await_vfs_invocation(locals, invocation).await.map(|_| ())
+    let invocation = Python::attach(|py| {
+        optional_invocation(py, callable.bind(py).call_method1("rename", (from, to)))
+    })?;
+    match invocation {
+        Some(invocation) => await_optional_vfs_invocation(locals, invocation)
+            .await
+            .map(|value| value.is_some()),
+        None => Ok(false),
+    }
 }
 
 fn vfs_callable(
@@ -1490,18 +1470,35 @@ fn invocation_result(py: Python<'_>, result: Bound<'_, PyAny>) -> PyResult<(Py<P
     Ok((result.unbind(), is_awaitable))
 }
 
-async fn await_vfs_invocation(
+fn optional_invocation(
+    py: Python<'_>,
+    result: PyResult<Bound<'_, PyAny>>,
+) -> Result<Option<(Py<PyAny>, bool)>, VfsError> {
+    match result {
+        Ok(result) => invocation_result(py, result)
+            .map(Some)
+            .map_err(vfs_python_error),
+        Err(error) if vfs_method_is_unimplemented(py, &error) => Ok(None),
+        Err(error) => Err(vfs_python_error(error)),
+    }
+}
+
+async fn await_optional_vfs_invocation(
     locals: pyo3_async_runtimes::TaskLocals,
     invocation: (Py<PyAny>, bool),
-) -> Result<Py<PyAny>, VfsError> {
+) -> Result<Option<Py<PyAny>>, VfsError> {
     if !invocation.1 {
-        return Ok(invocation.0);
+        return Ok(Some(invocation.0));
     }
     let future = Python::attach(|py| {
         pyo3_async_runtimes::into_future_with_locals(&locals, invocation.0.bind(py).clone())
     })
     .map_err(vfs_python_error)?;
-    future.await.map_err(vfs_python_error)
+    match future.await {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if Python::attach(|py| vfs_method_is_unimplemented(py, &error)) => Ok(None),
+        Err(error) => Err(vfs_python_error(error)),
+    }
 }
 
 async fn read_vfs_bytes(handler: &VfsHandler, path: &str) -> Result<Vec<u8>, VfsError> {
@@ -1541,8 +1538,11 @@ async fn invoke_vfs_rename(
         return vfs_failure(error, Some(stat));
     }
 
-    let result = if vfs_has_method(handler, "rename") {
-        call_vfs_rename_method(handler, &from, &to).await
+    let native_rename = call_vfs_rename_method(handler, &from, &to).await;
+    let result = if matches!(native_rename, Ok(true)) {
+        Ok(())
+    } else if let Err(error) = native_rename {
+        Err(error)
     } else if metadata.kind == VfsNodeKind::Directory {
         Err(VfsError {
             code: VfsErrorCode::PermissionDenied,
@@ -1667,6 +1667,10 @@ fn vfs_python_error(error: PyErr) -> VfsError {
             VfsErrorCode::IsDirectory
         } else if error.is_instance_of::<PyPermissionError>(py) {
             VfsErrorCode::PermissionDenied
+        } else if error.is_instance_of::<PyNotImplementedError>(py) {
+            VfsErrorCode::PermissionDenied
+        } else if python_error_has_errno(py, &error, "ENOTEMPTY") {
+            VfsErrorCode::DirectoryNotEmpty
         } else if error.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
             VfsErrorCode::Invalid
         } else {
@@ -1677,6 +1681,23 @@ fn vfs_python_error(error: PyErr) -> VfsError {
             message: error.to_string(),
         }
     })
+}
+
+fn vfs_method_is_unimplemented(py: Python<'_>, error: &PyErr) -> bool {
+    error.is_instance_of::<PyNotImplementedError>(py)
+        || error.is_instance_of::<PyAttributeError>(py)
+}
+
+fn python_error_has_errno(py: Python<'_>, error: &PyErr, name: &str) -> bool {
+    let actual = error
+        .value(py)
+        .getattr("errno")
+        .and_then(|value| value.extract::<i32>());
+    let expected = py
+        .import("errno")
+        .and_then(|module| module.getattr(name))
+        .and_then(|value| value.extract::<i32>());
+    matches!((actual, expected), (Ok(actual), Ok(expected)) if actual == expected)
 }
 
 async fn invoke_rpc_handler(
