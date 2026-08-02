@@ -136,6 +136,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wheels-${{ matrix.platform.name }}
+      - name: Install Windows cross-compilation tools
+        if: startsWith(matrix.platform.name, 'windows-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes llvm
+          command -v llvm-lib
       - uses: actions/download-artifact@v7
         with:
           name: component-runtime
