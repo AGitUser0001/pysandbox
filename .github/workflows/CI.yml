@@ -245,7 +245,7 @@ jobs:
           path: dist
 
   test-wheels:
-    name: Test ${{ matrix.platform.name }} wheels
+    name: Test ${{ matrix.platform.label }} wheels
     needs:
       - wheels
       - macos-wheels
@@ -255,71 +255,107 @@ jobs:
       matrix:
         platform:
           - name: linux-x86_64
+            label: linux-x86_64
             runner: ubuntu-22.04
             architecture: x64
+            python-versions: "3.12\n3.14t"
+            regular: true
+            freethreaded: true
           - name: linux-aarch64
+            label: linux-aarch64
             runner: ubuntu-22.04-arm
             architecture: arm64
+            python-versions: "3.12\n3.14t"
+            regular: true
+            freethreaded: true
           - name: windows-x64
+            label: windows-x64
             runner: windows-latest
             architecture: x64
+            python-versions: "3.12\n3.14t"
+            regular: true
+            freethreaded: true
           - name: windows-aarch64
+            label: windows-aarch64
             runner: windows-11-arm
             architecture: arm64
+            python-versions: "3.12\n3.14t"
+            regular: true
+            freethreaded: true
           - name: macos-x86_64
+            label: macos-x86_64 (regular)
             runner: macos-26-intel
             architecture: x64
+            python-versions: "3.12"
+            regular: true
+            freethreaded: false
+          - name: macos-x86_64
+            label: macos-x86_64 (free-threaded)
+            runner: macos-26-intel
+            architecture: x64
+            python-versions: "3.14t"
+            regular: false
+            freethreaded: true
           - name: macos-aarch64
+            label: macos-aarch64
             runner: macos-latest
             architecture: arm64
+            python-versions: "3.12\n3.14t"
+            regular: true
+            freethreaded: true
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: |
-            3.12
-            3.13
-            3.14
-            3.14t
-            3.15
-            3.15t
+          python-version: ${{ matrix.platform.python-versions }}
           architecture: ${{ matrix.platform.architecture }}
           allow-prereleases: true
-      - name: Find Python interpreters
-        id: python
+      - name: Find Python 3.12
+        if: matrix.platform.regular
+        id: python312
         run: >-
           python .github/scripts/find_python_interpreters.py
-          python312 python313 python314 python314t python315 python315t
+          python312
+      - name: Find free-threaded Python
+        if: matrix.platform.freethreaded
+        id: python314t
+        run: >-
+          python .github/scripts/find_python_interpreters.py
+          python314t
       - uses: actions/download-artifact@v7
         with:
           name: wheels-${{ matrix.platform.name }}
           path: dist
       - name: Install wheel
+        if: matrix.platform.regular
         shell: bash
         run: >-
-          '${{ steps.python.outputs.python312 }}'
+          '${{ steps.python312.outputs.python312 }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test installed wheel
+        if: matrix.platform.regular
         working-directory: tests
         shell: bash
         run: >-
-          '${{ steps.python.outputs.python312 }}'
+          '${{ steps.python312.outputs.python312 }}'
           -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
+        if: matrix.platform.freethreaded
         shell: bash
         run: >-
-          '${{ steps.python.outputs.python314t }}'
+          '${{ steps.python314t.outputs.python314t }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test free-threaded wheel
+        if: matrix.platform.freethreaded
         working-directory: tests
         shell: bash
         run: >-
-          '${{ steps.python.outputs.python314t }}'
+          '${{ steps.python314t.outputs.python314t }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
-          '${{ steps.python.outputs.python314t }}'
+          '${{ steps.python314t.outputs.python314t }}'
           -m pytest -n auto --dist worksteal .
 
   sdist:
