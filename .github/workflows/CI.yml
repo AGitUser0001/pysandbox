@@ -89,16 +89,94 @@ jobs:
           name: component-runtime
           path: target/pysandbox-runtime
 
-  linux:
+  wheels:
+    name: Build ${{ matrix.platform.name }} wheels
     needs: runtime
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: ubuntu-22.04-arm
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - runner: ubuntu-22.04
+          - name: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            zig: true
+          - name: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            zig: true
+          - name: windows-x64
+            target: x86_64-pc-windows-msvc
+            zig: false
+          - name: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            zig: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.12
+            3.13
+            3.14
+            3.14t
+            3.15
+            3.15t
+          allow-prereleases: true
+      - name: Find Python interpreters
+        id: python
+        run: >-
+          python .github/scripts/find_python_interpreters.py
+          python312 python313 python314 python314t python315 python315t
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wheels-${{ matrix.platform.name }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: component-runtime
+          path: .pysandbox-runtime
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
+          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
+        with:
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --interpreter
+            '${{ steps.python.outputs.python312 }}'
+            '${{ steps.python.outputs.python313 }}'
+            '${{ steps.python.outputs.python314 }}'
+            '${{ steps.python.outputs.python314t }}'
+            '${{ steps.python.outputs.python315 }}'
+            '${{ steps.python.outputs.python315t }}'
+            ${{ matrix.platform.zig && '--zig' || '' }}
+            ${{ startsWith(matrix.platform.name, 'linux-') && '--compatibility manylinux_2_28' || '' }}
+            --no-default-features
+            --manifest-path rust/pysandbox-native/Cargo.toml
+          manylinux: "off"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: dist
+
+  # Build both Apple targets on the faster ARM runner, which has the macOS SDK
+  # needed to cross-link the Intel wheel.
+  macos-wheels:
+    name: Build ${{ matrix.platform.name }} wheels
+    needs: runtime
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-x86_64
             target: x86_64
-          - runner: ubuntu-22.04-arm
+          - name: macos-aarch64
             target: aarch64
     steps:
       - uses: actions/checkout@v6
@@ -121,65 +199,66 @@ jobs:
           python312 python313 python314 python314t python315 python315t
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wheels-${{ matrix.platform.name }}
       - uses: actions/download-artifact@v7
         with:
           name: component-runtime
           path: .pysandbox-runtime
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
         with:
           target: ${{ matrix.platform.target }}
           args: >-
             --release
             --out dist
-            --find-interpreter
+            --interpreter
+            '${{ steps.python.outputs.python312 }}'
+            '${{ steps.python.outputs.python313 }}'
+            '${{ steps.python.outputs.python314 }}'
+            '${{ steps.python.outputs.python314t }}'
+            '${{ steps.python.outputs.python315 }}'
+            '${{ steps.python.outputs.python315t }}'
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
-          manylinux: "2_28"
-          docker-options: -e PYSANDBOX_PREBUILT_RUNTIME=.pysandbox-runtime
-      - name: Install wheel
-        run: >-
-          python -m pip install --pre --find-links dist
-          pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
-      - name: Test installed wheel
-        working-directory: tests
-        run: python -m pytest -n auto --dist worksteal .
-      - name: Install free-threaded wheel
-        run: >-
-          '${{ steps.python.outputs.python314t }}'
-          -m pip install --pre --find-links dist
-          pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
-      - name: Test free-threaded wheel
-        working-directory: tests
-        run: >-
-          '${{ steps.python.outputs.python314t }}'
-          -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
-          &&
-          '${{ steps.python.outputs.python314t }}'
-          -m pytest -n auto --dist worksteal .
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-linux-${{ matrix.platform.target }}
+          name: wheels-${{ matrix.platform.name }}
           path: dist
 
-  windows:
-    needs: runtime
+  test-wheels:
+    name: Test ${{ matrix.platform.name }} wheels
+    needs:
+      - wheels
+      - macos-wheels
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - runner: windows-latest
-            target: x64
+          - name: linux-x86_64
+            runner: ubuntu-22.04
             architecture: x64
-          - runner: windows-11-arm
-            target: aarch64
+          - name: linux-aarch64
+            runner: ubuntu-22.04-arm
+            architecture: arm64
+          - name: windows-x64
+            runner: windows-latest
+            architecture: x64
+          - name: windows-aarch64
+            runner: windows-11-arm
+            architecture: arm64
+          - name: macos-x86_64
+            runner: macos-26-intel
+            architecture: x64
+          - name: macos-aarch64
+            runner: macos-latest
             architecture: arm64
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: recursive
       - uses: actions/setup-python@v6
         with:
           python-version: |
@@ -196,126 +275,37 @@ jobs:
         run: >-
           python .github/scripts/find_python_interpreters.py
           python312 python313 python314 python314t python315 python315t
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v7
         with:
-          name: component-runtime
-          path: .pysandbox-runtime
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        env:
-          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
-        with:
-          target: ${{ matrix.platform.target }}
-          args: >-
-            --release
-            --out dist
-            --find-interpreter
-            --no-default-features
-            --manifest-path rust/pysandbox-native/Cargo.toml
-      - name: Install wheel
-        run: >-
-          & '${{ steps.python.outputs.python312 }}'
-          -m pip install --pre --find-links dist
-          pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
-      - name: Test installed wheel
-        working-directory: tests
-        run: >-
-          & '${{ steps.python.outputs.python312 }}'
-          -m pytest -n auto --dist worksteal .
-      - name: Install free-threaded wheel
-        run: >-
-          & '${{ steps.python.outputs.python314t }}'
-          -m pip install --pre --find-links dist
-          pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
-      - name: Test free-threaded wheel
-        working-directory: tests
-        run: |
-          & '${{ steps.python.outputs.python314t }}' -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
-          & '${{ steps.python.outputs.python314t }}' -m pytest -n auto --dist worksteal .
-      - name: Upload wheels
-        uses: actions/upload-artifact@v6
-        with:
-          name: wheels-windows-${{ matrix.platform.target }}
+          name: wheels-${{ matrix.platform.name }}
           path: dist
-
-  macos:
-    needs: runtime
-    runs-on: ${{ matrix.platform.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - runner: macos-26-intel
-            target: x86_64
-          - runner: macos-latest
-            target: aarch64
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-      - uses: actions/setup-python@v6
-        with:
-          python-version: |
-            3.12
-            3.13
-            3.14
-            3.14t
-            3.15
-            3.15t
-          allow-prereleases: true
-      - name: Find Python interpreters
-        id: python
-        run: >-
-          python .github/scripts/find_python_interpreters.py
-          python312 python313 python314 python314t python315 python315t
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v7
-        with:
-          name: component-runtime
-          path: .pysandbox-runtime
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        env:
-          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
-        with:
-          target: ${{ matrix.platform.target }}
-          args: >-
-            --release
-            --out dist
-            --find-interpreter
-            --no-default-features
-            --manifest-path rust/pysandbox-native/Cargo.toml
       - name: Install wheel
+        shell: bash
         run: >-
           '${{ steps.python.outputs.python312 }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test installed wheel
         working-directory: tests
+        shell: bash
         run: >-
           '${{ steps.python.outputs.python312 }}'
           -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
+        shell: bash
         run: >-
           '${{ steps.python.outputs.python314t }}'
           -m pip install --pre --find-links dist
           pysandbox-wasi pytest pytest-asyncio pytest-timeout pytest-xdist
       - name: Test free-threaded wheel
         working-directory: tests
+        shell: bash
         run: >-
           '${{ steps.python.outputs.python314t }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
           '${{ steps.python.outputs.python314t }}'
           -m pytest -n auto --dist worksteal .
-      - name: Upload wheels
-        uses: actions/upload-artifact@v6
-        with:
-          name: wheels-macos-${{ matrix.platform.target }}
-          path: dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -341,9 +331,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'release' || inputs.release_tag != '' }}
     needs:
-      - linux
-      - windows
-      - macos
+      - test-wheels
       - sdist
     environment: release
     permissions:
