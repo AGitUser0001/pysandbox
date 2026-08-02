@@ -26,6 +26,166 @@ enum CacheKey {
     List(String),
 }
 
+#[derive(Clone, Copy)]
+enum CacheSlot {
+    Stat,
+    Read,
+    List,
+}
+
+impl CacheKey {
+    fn parts(&self) -> (CacheSlot, &str) {
+        match self {
+            Self::Stat(path) => (CacheSlot::Stat, path),
+            Self::Read(path) => (CacheSlot::Read, path),
+            Self::List(path) => (CacheSlot::List, path),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CacheNode {
+    stat: Option<VfsResponse>,
+    read: Option<VfsResponse>,
+    list: Option<VfsResponse>,
+    children: HashMap<String, CacheNode>,
+}
+
+impl CacheNode {
+    fn get(&self, slot: CacheSlot) -> Option<&VfsResponse> {
+        match slot {
+            CacheSlot::Stat => self.stat.as_ref(),
+            CacheSlot::Read => self.read.as_ref(),
+            CacheSlot::List => self.list.as_ref(),
+        }
+    }
+
+    fn set(&mut self, slot: CacheSlot, response: VfsResponse) {
+        *match slot {
+            CacheSlot::Stat => &mut self.stat,
+            CacheSlot::Read => &mut self.read,
+            CacheSlot::List => &mut self.list,
+        } = Some(response);
+    }
+
+    fn remove(&mut self, slot: CacheSlot) {
+        *match slot {
+            CacheSlot::Stat => &mut self.stat,
+            CacheSlot::Read => &mut self.read,
+            CacheSlot::List => &mut self.list,
+        } = None;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.stat.is_none()
+            && self.read.is_none()
+            && self.list.is_none()
+            && self.children.is_empty()
+    }
+}
+
+#[derive(Default)]
+struct VfsCache {
+    root: CacheNode,
+}
+
+impl VfsCache {
+    fn clear(&mut self) {
+        self.root = CacheNode::default();
+    }
+
+    fn get(&self, key: &CacheKey) -> Option<&VfsResponse> {
+        let (slot, path) = key.parts();
+        self.node(path)?.get(slot)
+    }
+
+    fn insert(&mut self, key: CacheKey, response: VfsResponse) {
+        let (slot, path) = key.parts();
+        self.node_mut_or_create(path).set(slot, response);
+    }
+
+    fn invalidate(&mut self, path: &str) {
+        if path == "/" {
+            self.clear();
+            return;
+        }
+        self.take_subtree(path);
+        self.remove(&CacheKey::List(parent_path(path)));
+    }
+
+    fn rename(&mut self, from: &str, to: &str) {
+        let subtree = self.take_subtree(from);
+        self.take_subtree(to);
+        if let Some(subtree) = subtree {
+            self.insert_subtree(to, subtree);
+        }
+        self.remove(&CacheKey::List(parent_path(from)));
+        self.remove(&CacheKey::List(parent_path(to)));
+    }
+
+    fn node(&self, path: &str) -> Option<&CacheNode> {
+        let mut node = &self.root;
+        for component in path_components(path) {
+            node = node.children.get(component)?;
+        }
+        Some(node)
+    }
+
+    fn node_mut_or_create(&mut self, path: &str) -> &mut CacheNode {
+        let mut node = &mut self.root;
+        for component in path_components(path) {
+            node = node.children.entry(component.to_owned()).or_default();
+        }
+        node
+    }
+
+    fn remove(&mut self, key: &CacheKey) {
+        let (slot, path) = key.parts();
+        let components = path_components(path).collect::<Vec<_>>();
+        Self::remove_from_node(&mut self.root, &components, slot);
+    }
+
+    fn remove_from_node(node: &mut CacheNode, components: &[&str], slot: CacheSlot) -> bool {
+        if let Some((component, remaining)) = components.split_first() {
+            if let Some(child) = node.children.get_mut(*component)
+                && Self::remove_from_node(child, remaining, slot)
+            {
+                node.children.remove(*component);
+            }
+        } else {
+            node.remove(slot);
+        }
+        node.is_empty()
+    }
+
+    fn take_subtree(&mut self, path: &str) -> Option<CacheNode> {
+        if path == "/" {
+            return Some(std::mem::take(&mut self.root));
+        }
+        let mut components = path_components(path).collect::<Vec<_>>();
+        let name = components.pop()?;
+        let mut parent = &mut self.root;
+        for component in components {
+            parent = parent.children.get_mut(component)?;
+        }
+        parent.children.remove(name)
+    }
+
+    fn insert_subtree(&mut self, path: &str, subtree: CacheNode) {
+        if path == "/" {
+            self.root = subtree;
+            return;
+        }
+        let mut components = path_components(path).collect::<Vec<_>>();
+        let name = components.pop().expect("non-root path has a component");
+        let mut parent = &mut self.root;
+        for component in components {
+            parent = parent.children.entry(component.to_owned()).or_default();
+        }
+        parent.children.insert(name.to_owned(), subtree);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RemoteVfs {
     worker_id: u64,
@@ -34,7 +194,7 @@ pub(crate) struct RemoteVfs {
     pending: PendingVfsRequests,
     policy: CachePolicy,
     generation: Arc<AtomicU64>,
-    cache: Arc<Mutex<HashMap<CacheKey, VfsResponse>>>,
+    cache: Arc<Mutex<VfsCache>>,
 }
 
 impl RemoteVfs {
@@ -51,7 +211,7 @@ impl RemoteVfs {
             pending,
             policy,
             generation: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(VfsCache::default())),
         }
     }
 
@@ -76,13 +236,12 @@ impl RemoteVfs {
             return;
         };
         let path = normalize_path(path);
-        let parent = parent_path(&path);
-        cache.retain(|key, _| match key {
-            CacheKey::Stat(cached) | CacheKey::Read(cached) => {
-                !is_same_or_descendant(cached, &path)
-            }
-            CacheKey::List(cached) => !is_same_or_descendant(cached, &path) && cached != &parent,
-        });
+        cache.invalidate(&path);
+    }
+
+    async fn rename_cached_path(&self, from: &str, to: &str) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.cache.lock().await.rename(from, to);
     }
 
     async fn cached_stat(&self, path: &str) -> Option<VfsStatResult> {
@@ -101,6 +260,16 @@ impl RemoteVfs {
         path: &str,
         key: Option<CacheKey>,
         request: VfsRequest,
+    ) -> VfsResult<VfsValue> {
+        self.request_with_rename(path, key, request, None).await
+    }
+
+    async fn request_with_rename(
+        &self,
+        path: &str,
+        key: Option<CacheKey>,
+        request: VfsRequest,
+        rename_to: Option<&str>,
     ) -> VfsResult<VfsValue> {
         if let Some(key) = &key
             && matches!(self.policy, CachePolicy::Invalidated { .. })
@@ -134,7 +303,11 @@ impl RemoteVfs {
             .await
             .map_err(|_| VfsError::Io("VFS response channel was closed".into()))?;
         if response.invalidate {
-            self.invalidate(Some(path)).await;
+            if let Some(to) = rename_to {
+                self.rename_cached_path(path, to).await;
+            } else {
+                self.invalidate(Some(path)).await;
+            }
         } else if generation == self.generation.load(Ordering::Acquire) {
             let mut cache = self.cache.lock().await;
             if let Some(stat) = &response.stat {
@@ -184,12 +357,8 @@ fn response_is_cacheable(policy: CachePolicy, response: &VfsResponse) -> bool {
     }
 }
 
-fn is_same_or_descendant(candidate: &str, path: &str) -> bool {
-    candidate == path
-        || path == "/"
-        || candidate
-            .strip_prefix(path)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+fn path_components(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/').filter(|component| !component.is_empty())
 }
 
 #[async_trait]
@@ -363,7 +532,7 @@ impl VfsStorage for RemoteVfs {
         let stat = self.cached_stat(&from).await;
         let to_stat = self.cached_stat(&to).await;
         let value = self
-            .request(
+            .request_with_rename(
                 &from,
                 None,
                 VfsRequest::Rename {
@@ -372,9 +541,9 @@ impl VfsStorage for RemoteVfs {
                     stat,
                     to_stat,
                 },
+                Some(&to),
             )
             .await?;
-        self.invalidate(Some(&to)).await;
         match value {
             VfsValue::Unit => Ok(()),
             _ => Err(VfsError::Io(
@@ -549,6 +718,27 @@ mod tests {
         }
     }
 
+    fn metadata_response(size: u64) -> VfsResponse {
+        VfsResponse {
+            value: Some(VfsValue::Metadata(VfsMetadata {
+                kind: VfsNodeKind::File,
+                size,
+                read: true,
+                write: false,
+            })),
+            error: None,
+            stat: None,
+            invalidate: false,
+        }
+    }
+
+    fn cached_size(cache: &VfsCache, key: &CacheKey) -> Option<u64> {
+        match &cache.get(key)?.value {
+            Some(VfsValue::Metadata(metadata)) => Some(metadata.size),
+            _ => None,
+        }
+    }
+
     #[test]
     fn cache_policy_never_caches_io_or_malformed_responses() {
         let successes = VfsResponse {
@@ -586,5 +776,83 @@ mod tests {
         ));
         assert!(!response_is_cacheable(with_negative, &malformed));
         assert!(!response_is_cacheable(CachePolicy::None, &successes));
+    }
+
+    #[test]
+    fn trie_invalidation_removes_a_subtree_and_its_parent_listing() {
+        let mut cache = VfsCache::default();
+        cache.insert(CacheKey::List("/123".into()), metadata_response(1));
+        cache.insert(CacheKey::Stat("/123/folder".into()), metadata_response(2));
+        cache.insert(
+            CacheKey::Read("/123/folder/file.py".into()),
+            metadata_response(3),
+        );
+        cache.insert(
+            CacheKey::Stat("/123/sibling.py".into()),
+            metadata_response(4),
+        );
+        cache.insert(CacheKey::List("/".into()), metadata_response(5));
+
+        cache.invalidate("/123/folder");
+
+        assert!(cache.get(&CacheKey::List("/123".into())).is_none());
+        assert!(cache.get(&CacheKey::Stat("/123/folder".into())).is_none());
+        assert!(
+            cache
+                .get(&CacheKey::Read("/123/folder/file.py".into()))
+                .is_none()
+        );
+        assert_eq!(
+            cached_size(&cache, &CacheKey::Stat("/123/sibling.py".into())),
+            Some(4)
+        );
+        assert_eq!(cached_size(&cache, &CacheKey::List("/".into())), Some(5));
+    }
+
+    #[test]
+    fn trie_rename_moves_the_cached_subtree() {
+        let mut cache = VfsCache::default();
+        cache.insert(CacheKey::List("/source".into()), metadata_response(1));
+        cache.insert(CacheKey::List("/target".into()), metadata_response(2));
+        cache.insert(
+            CacheKey::Stat("/source/folder".into()),
+            metadata_response(3),
+        );
+        cache.insert(
+            CacheKey::Read("/source/folder/file.py".into()),
+            metadata_response(4),
+        );
+        cache.insert(
+            CacheKey::Stat("/target/renamed/old.py".into()),
+            metadata_response(5),
+        );
+        cache.insert(CacheKey::Stat("/unrelated.py".into()), metadata_response(6));
+
+        cache.rename("/source/folder", "/target/renamed");
+
+        assert!(cache.get(&CacheKey::List("/source".into())).is_none());
+        assert!(cache.get(&CacheKey::List("/target".into())).is_none());
+        assert!(
+            cache
+                .get(&CacheKey::Stat("/source/folder".into()))
+                .is_none()
+        );
+        assert_eq!(
+            cached_size(&cache, &CacheKey::Stat("/target/renamed".into())),
+            Some(3)
+        );
+        assert_eq!(
+            cached_size(&cache, &CacheKey::Read("/target/renamed/file.py".into())),
+            Some(4)
+        );
+        assert!(
+            cache
+                .get(&CacheKey::Stat("/target/renamed/old.py".into()))
+                .is_none()
+        );
+        assert_eq!(
+            cached_size(&cache, &CacheKey::Stat("/unrelated.py".into())),
+            Some(6)
+        );
     }
 }
