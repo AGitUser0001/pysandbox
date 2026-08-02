@@ -34,7 +34,7 @@ executables available on `PATH`.
 
 ## Checks
 
-Static checks format the source after validating it:
+Static checks validate and then format the source:
 
 ```sh
 ./static_checks.sh
@@ -93,7 +93,8 @@ extract it and point the native build at it:
 
 ```sh
 mkdir -p tmp/component-runtime
-tar -xzf pysandbox-component-runtime-v1.4.0.tar.gz -C tmp/component-runtime
+RELEASE_TAG="v$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+tar -xzf "pysandbox-component-runtime-${RELEASE_TAG}.tar.gz" -C tmp/component-runtime
 PYSANDBOX_PREBUILT_RUNTIME="$PWD/tmp/component-runtime" uv build
 ```
 
@@ -140,12 +141,20 @@ the runtime architecture.
 
 ## Releases
 
-Update the version in `pyproject.toml`, update `uv.lock`, and publish a GitHub
-Release whose tag matches the version, such as `v1.4.1`. The release event runs
-the complete platform matrix, attests every artifact, attaches the artifacts to
-the GitHub Release, and publishes them to PyPI through Trusted Publishing.
+Update the version in `pyproject.toml` and refresh `uv.lock`. Then manually run
+the `CI` workflow from the commit being released and set `release_tag` to the
+matching tag, such as `v1.5.1`. An ordinary push or pull-request run builds and
+tests artifacts but does not publish them.
+
+Release preflight verifies that the requested tag matches the project version.
+If the tag already exists, it must resolve to the selected workflow commit. The
+workflow builds the shared component runtime and every native wheel, runs static
+checks and native installed-wheel tests, and validates the built wheel versions
+again before publishing.
 
 The `release` GitHub environment requires approval and holds the publishing
-boundary. No PyPI token is stored in the repository. For recovery after a
-release-job failure, manually dispatch the CI workflow with `release_tag` set to
-the existing release tag.
+boundary. No PyPI token is stored in the repository. After approval, the job
+attests and publishes the artifacts to PyPI through OIDC Trusted Publishing,
+creates the Git tag and GitHub Release when absent, and attaches the wheels and
+component-runtime archive. A failed release can be retried by dispatching the
+same commit with the same `release_tag`.

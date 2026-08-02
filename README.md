@@ -3,7 +3,7 @@
 [![CI](https://github.com/AGitUser0001/pysandbox/actions/workflows/CI.yml/badge.svg)](https://github.com/AGitUser0001/pysandbox/actions/workflows/CI.yml)
 [![CodeQL](https://github.com/AGitUser0001/pysandbox/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/AGitUser0001/pysandbox/actions/workflows/github-code-scanning/codeql)
 [![PyPI](https://img.shields.io/pypi/v/pysandbox-wasi)](https://pypi.org/project/pysandbox-wasi/)
-[![License](https://img.shields.io/pypi/l/pysandbox-wasi)](LICENSE.md)
+[![License](https://img.shields.io/pypi/l/pysandbox-wasi)](https://github.com/AGitUser0001/pysandbox/blob/main/LICENSE.md)
 [![Python](https://img.shields.io/pypi/pyversions/pysandbox-wasi)](https://pypi.org/project/pysandbox-wasi/)
 [![Release](https://img.shields.io/github/v/release/AGitUser0001/pysandbox)](https://github.com/AGitUser0001/pysandbox/releases)
 
@@ -239,7 +239,9 @@ are shared across workers until the host calls
 Successful responses are cached by default. Set `cache_vfs_negative=True` to
 also cache non-I/O errors such as missing paths; overload, transport, and
 malformed-response errors are never cached. Successful mutations invalidate
-the affected cached paths.
+the affected cached paths. Directory invalidation removes its cached subtree;
+directory rename moves an already-cached subtree without scanning every cached
+path.
 
 `worker_queue_capacity` bounds pending executions and user-level calls for
 each worker. When either queue is full, new work fails immediately without
@@ -287,7 +289,27 @@ result = await runtime.execute(
 Dependencies are included by default. Set `include_dependencies=False` to
 resolve only the requested distribution. `build=False` rejects source
 distributions; enabling builds runs their build backend on the trusted host.
-Only compatible pure-Python wheels are accepted.
+Only compatible pure-Python wheels are accepted. `source` may point to a wheel,
+source archive, or source directory.
+
+Package resolution and extraction can be bounded independently for the direct
+package and its dependencies:
+
+```python
+package = Package(
+  "example==1.0",
+  build=False,
+  max_size=10 * 1024 * 1024,
+  max_files=1_000,
+  max_dependencies=100,
+  max_dependency_size=10 * 1024 * 1024,
+  max_dependency_files=1_000,
+)
+```
+
+All five limits default to `None`. They bound downloads and extracted wheel or
+source contents. An enabled source build is trusted host code and its build
+process is not sandboxed by these limits.
 
 `runtime.packages.cache` exposes `add()`, `resolve()`, `remove()`, and
 `packages()`. The default uses the platform cache directory returned by

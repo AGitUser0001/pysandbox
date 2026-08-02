@@ -214,11 +214,14 @@ and file rename becomes a non-atomic copy and delete. Directory rename requires
 an explicit handler. Host exceptions are translated into the corresponding
 guest filesystem errors.
 
-Successful results may be cached across workers. Invalidation is
-generation-aware and recursive for descendants, preventing an in-flight stale
-response from repopulating the cache. Errors are not cached by default;
-optional negative caching covers stable non-I/O failures but never overload or
-malformed responses. Successful mutations invalidate affected cached paths.
+Successful results may be cached across workers in a component-indexed tree.
+Exact lookup walks one child map per path component. Directory invalidation
+detaches the cached subtree directly, and directory rename moves that subtree
+to its new parent without scanning or rewriting every descendant key.
+Generation checks prevent an in-flight stale response from repopulating an
+invalidated node. Errors are not cached by default; optional negative caching
+covers stable non-I/O failures but never overload or malformed responses.
+Successful mutations invalidate affected cached paths and parent listings.
 
 `pysandbox.packages` resolves requirements in Python with `resolvelib`. Wheels
 are validated and installed into immutable reusable layers. Source distributions
@@ -226,7 +229,9 @@ or directory sources may be built only when explicitly enabled; build backends
 execute as trusted host code. Package environments pass only their layer paths
 to Rust, where the final directory name becomes the overlay name. Native wheels
 are rejected because guest extensions must target the componentized WASI Python
-runtime.
+runtime. Optional package limits bound dependency count, artifact bytes, and
+extracted file count for direct and transitive packages. They do not sandbox an
+explicitly enabled source build.
 
 ## Build and Distribution
 
@@ -235,11 +240,18 @@ its test tree, adds pure-Python cbor2, builds the component, and compiles the
 runtime tree with the componentized interpreter. Maturin's native build script
 either generates those inputs or copies them from `PYSANDBOX_PREBUILT_RUNTIME`.
 
-CI builds the platform-independent component runtime once, then reuses it for
-the Linux, Windows, and macOS x86_64/ARM64 wheel matrix. Native wheels remain
-specific to each CPython ABI, including free-threaded ABIs. Release artifacts
-are attested, attached to the GitHub Release, and published to PyPI using OIDC
-Trusted Publishing.
+CI builds the platform-independent component runtime once and reuses it for
+every wheel. Linux and Windows targets are cross-built on a Linux ARM runner;
+both macOS targets are built on a macOS ARM runner. The resulting wheels are
+then installed and tested on their native x86_64/ARM64 platforms with CPython
+3.12 and free-threaded 3.14. Native wheels remain specific to every supported
+CPython ABI, including free-threaded ABIs.
+
+Publishing is an explicitly dispatched workflow operation. Its selected commit
+and requested tag are validated before the matrix runs. After checks and native
+wheel tests pass, the protected `release` environment uses OIDC Trusted
+Publishing to upload attested artifacts to PyPI, then creates the matching Git
+tag and GitHub Release and attaches the wheels and reusable component runtime.
 
 ## Trust Boundaries
 
