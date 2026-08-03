@@ -186,8 +186,8 @@ jobs:
           container: "off"
           before-script-linux: |
             mkdir -p "$GITHUB_WORKSPACE/.ci-tools"
-            cp "$(command -v maturin)" "$CARGO_BIN_EXE_cargo-zigbuild"
-            chmod +x "$CARGO_BIN_EXE_cargo-zigbuild"
+            cp "$(command -v maturin)" "$GITHUB_WORKSPACE/.ci-tools/maturin-v1.14.1"
+            chmod +x "$GITHUB_WORKSPACE/.ci-tools/maturin-v1.14.1"
           maturin-version: v1.14.1
           target: ${{ matrix.platform.target }}
           args: >-
