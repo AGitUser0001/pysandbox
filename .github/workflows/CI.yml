@@ -117,6 +117,10 @@ jobs:
     name: Build ${{ matrix.platform.name }} wheels
     needs: runtime
     runs-on: ubuntu-22.04-arm
+    env:
+      # cargo-zigbuild includes its executable path in Cargo fingerprints. Keep
+      # it stable and visible when rust-cache computes the cache generation.
+      CARGO_BIN_EXE_cargo-zigbuild: ${{ github.workspace }}/.ci-tools/maturin-v1.14.1
     strategy:
       fail-fast: false
       matrix:
@@ -155,6 +159,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wheels-${{ matrix.platform.name }}
+          # The previous generation predates the stable cargo-zigbuild path and
+          # is immutable, so it can never learn the corrected artifacts.
+          key: cross-build-v1
       - name: Cache Windows SDK and CRT
         if: startsWith(matrix.platform.name, 'windows-')
         uses: actions/cache@v5
@@ -174,9 +181,6 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          # cargo-zigbuild includes its executable path in the linker-wrapper
-          # fingerprint. Keep that path stable across Actions runs.
-          CARGO_BIN_EXE_cargo-zigbuild: ${{ github.workspace }}/.ci-tools/maturin-v1.14.1
           MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
           PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
           XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
