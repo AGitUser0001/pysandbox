@@ -343,7 +343,7 @@ jobs:
           - name: windows-aarch64
             label: windows-aarch64
             runner: windows-11-arm
-            python-versions: "3.12\n3.14t"
+            python-versions: "3.12-aarch64\n3.14t-aarch64"
             regular: true
             freethreaded: true
           - name: macos-x86_64
@@ -379,12 +379,16 @@ jobs:
         if: matrix.platform.regular
         id: python312
         shell: bash
-        run: echo "python312=$(uv python find --managed-python 3.12)" >> "$GITHUB_OUTPUT"
+        env:
+          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.12-aarch64' || '3.12' }}
+        run: echo "python312=$(uv python find --managed-python $PYTHON_REQUEST)" >> "$GITHUB_OUTPUT"
       - name: Find free-threaded Python
         if: matrix.platform.freethreaded
         id: python314t
         shell: bash
-        run: echo "python314t=$(uv python find --managed-python 3.14t)" >> "$GITHUB_OUTPUT"
+        env:
+          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.14t-aarch64' || '3.14t' }}
+        run: echo "python314t=$(uv python find --managed-python $PYTHON_REQUEST)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v7
         with:
           name: wheels-${{ matrix.platform.name }}
