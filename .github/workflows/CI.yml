@@ -391,38 +391,54 @@ jobs:
           path: dist
       - name: Install wheel
         if: matrix.platform.regular
+        id: regular_environment
         shell: bash
-        run: >-
-          uv pip install
-          --python '${{ steps.python312.outputs.python312 }}'
-          --prerelease allow
-          dist/*-cp312-cp312-*.whl
-          pytest pytest-asyncio pytest-timeout pytest-xdist
+        run: |
+          uv venv --python '${{ steps.python312.outputs.python312 }}' .test-venv-312
+          uv pip install \
+            --python .test-venv-312 \
+            --prerelease allow \
+            dist/*-cp312-cp312-*.whl \
+            pytest pytest-asyncio pytest-timeout pytest-xdist
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python="$PWD/.test-venv-312/Scripts/python.exe"
+          else
+            python="$PWD/.test-venv-312/bin/python"
+          fi
+          echo "python=$python" >> "$GITHUB_OUTPUT"
       - name: Test installed wheel
         if: matrix.platform.regular
         working-directory: tests
         shell: bash
         run: >-
-          '${{ steps.python312.outputs.python312 }}'
+          '${{ steps.regular_environment.outputs.python }}'
           -m pytest -n auto --dist worksteal .
       - name: Install free-threaded wheel
         if: matrix.platform.freethreaded
+        id: freethreaded_environment
         shell: bash
-        run: >-
-          uv pip install
-          --python '${{ steps.python314t.outputs.python314t }}'
-          --prerelease allow
-          dist/*-cp314-cp314t-*.whl
-          pytest pytest-asyncio pytest-timeout pytest-xdist
+        run: |
+          uv venv --python '${{ steps.python314t.outputs.python314t }}' .test-venv-314t
+          uv pip install \
+            --python .test-venv-314t \
+            --prerelease allow \
+            dist/*-cp314-cp314t-*.whl \
+            pytest pytest-asyncio pytest-timeout pytest-xdist
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python="$PWD/.test-venv-314t/Scripts/python.exe"
+          else
+            python="$PWD/.test-venv-314t/bin/python"
+          fi
+          echo "python=$python" >> "$GITHUB_OUTPUT"
       - name: Test free-threaded wheel
         if: matrix.platform.freethreaded
         working-directory: tests
         shell: bash
         run: >-
-          '${{ steps.python314t.outputs.python314t }}'
+          '${{ steps.freethreaded_environment.outputs.python }}'
           -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
           &&
-          '${{ steps.python314t.outputs.python314t }}'
+          '${{ steps.freethreaded_environment.outputs.python }}'
           -m pytest -n auto --dist worksteal .
 
   sdist:
