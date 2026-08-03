@@ -17,7 +17,14 @@ from typing import Self
 from platformdirs import user_cache_path
 
 from . import _core
-from .packages import PackageCache, PackageEnvironment, PackageManager
+from .packages import (
+  DEFAULT_PACKAGE_CACHE,
+  DEFAULT_PACKAGE_INDEX,
+  PackageCache,
+  PackageEnvironment,
+  PackageIndex,
+  PackageManager,
+)
 from .rpc import RpcHost
 from .vfs import VirtualFileSystem
 
@@ -223,7 +230,8 @@ class PythonRuntime:
     vfs: VirtualFileSystem | None = None,
     cache_vfs: bool = False,
     cache_vfs_negative: bool = False,
-    package_cache: PackageCache | None = None,
+    package_cache: PackageCache | None = DEFAULT_PACKAGE_CACHE,
+    package_index: PackageIndex = DEFAULT_PACKAGE_INDEX,
     compilation_cache: bool | Path = True,
   ) -> None:
     if max_ipc_frame_bytes <= 0:
@@ -243,7 +251,7 @@ class PythonRuntime:
     self.cache_vfs = cache_vfs
     self.cache_vfs_negative = cache_vfs_negative
     self.compilation_cache = compilation_cache
-    self.packages = PackageManager(cache=package_cache)
+    self.packages = PackageManager(cache=package_cache, index=package_index)
     self.rpc = RpcHost(self._register_handler)
     self._sandbox: _core.SandboxProcess | None = None
     self._start_lock: asyncio.Lock | None = None

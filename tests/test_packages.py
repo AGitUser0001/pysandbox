@@ -9,6 +9,8 @@ import pytest
 from packaging.version import Version
 
 from pysandbox import (
+  DEFAULT_PACKAGE_CACHE,
+  DEFAULT_PACKAGE_INDEX,
   Package,
   PackageCache,
   PackageEnvironment,
@@ -59,6 +61,16 @@ class TestPackages:
   @pytest.fixture(autouse=True)
   def package_root(self, tmp_path: Path) -> None:
     self.root = tmp_path
+
+  async def test_default_package_dependencies_are_explicit(self) -> None:
+    runtime = PythonRuntime()
+
+    assert runtime.packages.cache is DEFAULT_PACKAGE_CACHE
+    assert runtime.packages.index is DEFAULT_PACKAGE_INDEX
+
+    manager = PackageManager(cache=None, index=DEFAULT_PACKAGE_INDEX)
+    with pytest.raises(PackageError, match="package cache is unavailable"):
+      await manager.resolve("example")
 
   async def test_resolves_dependencies_and_reuses_version_layers(self) -> None:
     dependency = make_wheel(self.root, "dependency", "2.0")
@@ -147,7 +159,9 @@ class TestPackages:
 
   async def test_source_directory_is_built(self) -> None:
     source = make_source_project(self.root)
-    manager = PackageManager(cache=PackageCache(self.root / "cache"))
+    manager = PackageManager(
+      cache=PackageCache(self.root / "cache"), index=DEFAULT_PACKAGE_INDEX
+    )
 
     environment = await manager.resolve(Package("example==1.0", source=source))
 
@@ -158,14 +172,18 @@ class TestPackages:
 
   async def test_source_directory_requires_build(self) -> None:
     source = make_source_project(self.root)
-    manager = PackageManager(cache=PackageCache(self.root / "cache"))
+    manager = PackageManager(
+      cache=PackageCache(self.root / "cache"), index=DEFAULT_PACKAGE_INDEX
+    )
 
     with pytest.raises(PackageError):
       await manager.resolve(Package("example==1.0", source=source, build=False))
 
   async def test_source_directory_size_limit(self) -> None:
     source = make_source_project(self.root)
-    manager = PackageManager(cache=PackageCache(self.root / "cache"))
+    manager = PackageManager(
+      cache=PackageCache(self.root / "cache"), index=DEFAULT_PACKAGE_INDEX
+    )
 
     with pytest.raises(PackageError, match="size limit"):
       await manager.resolve(Package("example==1.0", source=source, max_size=1))

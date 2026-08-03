@@ -1,4 +1,6 @@
 from .packages import (
+  DEFAULT_PACKAGE_CACHE,
+  DEFAULT_PACKAGE_INDEX,
   CachedPackage,
   CachePolicy,
   Package,
@@ -7,6 +9,7 @@ from .packages import (
   PackageError,
   PackageIndex,
   PackageManager,
+  PyPIIndex,
 )
 from .rpc import RpcContext, RpcHandler, RpcHost
 from .runtime import (
@@ -27,6 +30,8 @@ from .runtime import (
 from .vfs import VfsDirectoryEntry, VfsMetadata, VirtualFileSystem
 
 __all__ = [
+  "DEFAULT_PACKAGE_CACHE",
+  "DEFAULT_PACKAGE_INDEX",
   "AddFuel",
   "CachePolicy",
   "CachedPackage",
@@ -39,6 +44,7 @@ __all__ = [
   "PackageError",
   "PackageIndex",
   "PackageManager",
+  "PyPIIndex",
   "PythonRuntime",
   "RpcContext",
   "RpcHandler",

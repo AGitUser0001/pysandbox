@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, Protocol, Self
 
-from pysandbox import PythonRuntime, RpcContext, RuntimeLimits
+from . import PythonRuntime, RpcContext, RuntimeLimits
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"

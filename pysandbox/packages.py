@@ -33,6 +33,8 @@ from platformdirs import user_cache_path
 from resolvelib import AbstractProvider, BaseReporter, Resolver
 
 __all__ = [
+  "DEFAULT_PACKAGE_CACHE",
+  "DEFAULT_PACKAGE_INDEX",
   "CachePolicy",
   "CachedPackage",
   "Package",
@@ -41,6 +43,7 @@ __all__ = [
   "PackageError",
   "PackageIndex",
   "PackageManager",
+  "PyPIIndex",
 ]
 
 type CachePolicy = Literal["by_version", "never"]
@@ -413,11 +416,12 @@ class _Candidate:
   def prepare(self) -> None:
     if self.wheel is None and self.cached is None:
       ensure_size(self.artifact.size, self.package.max_size, self.artifact.filename)
+      cache = self.manager._require_cache()
       cached = (
-        self.manager.cache._resolve(
+        cache._resolve(
           self.name,
           self.version,
-          self.manager.cache.root,
+          cache.root,
         )
         if self.allow_cached
         else None
@@ -594,15 +598,26 @@ class _Provider(AbstractProvider[_PackageRequirement, _Candidate, str]):
     return candidate.dependencies or ()
 
 
+# Cache discovery can fail in restricted or incompletely configured environments.
+try:
+  DEFAULT_PACKAGE_CACHE: PackageCache | None = PackageCache(
+    user_cache_path("pysandbox") / "packages"
+  )
+except Exception:
+  DEFAULT_PACKAGE_CACHE = None
+
+DEFAULT_PACKAGE_INDEX: PackageIndex = PyPIIndex()
+
+
 class PackageManager:
   def __init__(
     self,
     *,
-    cache: PackageCache | None = None,
-    index: PackageIndex | None = None,
+    cache: PackageCache | None = DEFAULT_PACKAGE_CACHE,
+    index: PackageIndex = DEFAULT_PACKAGE_INDEX,
   ) -> None:
-    self.cache = cache or PackageCache(user_cache_path("pysandbox") / "packages")
-    self.index = index or PyPIIndex()
+    self.cache = cache
+    self.index = index
 
   async def resolve(
     self,
@@ -611,6 +626,7 @@ class PackageManager:
   ) -> PackageEnvironment:
     if cache not in {"by_version", "never"}:
       raise ValueError("cache must be 'by_version' or 'never'")
+    package_cache = self._require_cache()
     requested = tuple(normalize_package(package) for package in packages)
     temporary: tempfile.TemporaryDirectory[str] | None = tempfile.TemporaryDirectory(
       prefix="pysandbox-packages-"
@@ -634,7 +650,7 @@ class PackageManager:
         if candidate.wheel is None:
           raise PackageError(f"failed to prepare {candidate.name}=={candidate.version}")
         installed.append(
-          await self.cache.install(
+          await package_cache.install(
             candidate.wheel,
             build=False,
             policy=cache,
@@ -656,6 +672,11 @@ class PackageManager:
       if temporary is not None:
         temporary.cleanup()
       raise
+
+  def _require_cache(self) -> PackageCache:
+    if self.cache is None:
+      raise PackageError("package cache is unavailable")
+    return self.cache
 
   def _resolve(
     self,
