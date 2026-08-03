@@ -402,6 +402,7 @@ def playground() -> None:
 
   host_namespace: dict[str, Any] = {
     "asyncio": asyncio,
+    "RpcContext": RpcContext,
     "RuntimeLimits": RuntimeLimits,
     "PythonRuntime": PythonRuntime,
   }
