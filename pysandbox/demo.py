@@ -372,14 +372,19 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
       """
             async def main() -> None:
                 worker = runtime.run(
-                    "value = 41",
+                    '''
+            value = 41
+
+            def increment():
+                return value + 1
+            ''',
                     limits=RuntimeLimits(
                         fuel=10_000_000_000,
                         timeout=30,
                     ),
                 )
                 try:
-                    print(await worker.call(("eval",), None, "value + 1"))
+                    print(await worker.call(("increment",), None))
                 finally:
                     await worker.close()
                     await runtime.close()
