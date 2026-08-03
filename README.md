@@ -24,7 +24,7 @@ component-runtime artifact, see
 ## Demo
 
 ```sh
-uv run python -m pysandbox.demo
+python -m pysandbox.demo
 ```
 
 ## One-Shot Execution
