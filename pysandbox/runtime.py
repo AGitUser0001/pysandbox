@@ -510,6 +510,18 @@ class Worker:
     *args: object,
     **kwargs: object,
   ) -> object:
+    if not path:
+      raise ValueError("worker call path must not be empty")
+    return await self._call(path, options, *args, **kwargs)
+
+  async def _call(
+    self,
+    path: tuple[str, ...],
+    options: WorkerCallOptions | None,
+    /,
+    *args: object,
+    **kwargs: object,
+  ) -> object:
     if options is not None and options.timeout is not None and options.timeout <= 0:
       raise ValueError("worker call timeout must be positive")
     if self.task.done():
@@ -523,6 +535,16 @@ class Worker:
       return await call
     async with asyncio.timeout(options.timeout):
       return await call
+
+  async def call_function(
+    self,
+    source: str,
+    fuel: SetFuel | AddFuel | None,
+    /,
+    **kwargs: object,
+  ) -> object:
+    options = WorkerCallOptions(fuel=fuel) if fuel is not None else None
+    return await self._call((), options, source, **kwargs)
 
   async def set_fuel(self, fuel: int) -> None:
     await (await self._execution).set_fuel(fuel)

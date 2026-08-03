@@ -115,6 +115,24 @@ print(await worker.call(("increment",), options, 2))
 cancel the guest operation, which may continue executing and producing side
 effects.
 
+`call_function()` executes an asynchronous function body against the worker's
+persistent globals. Values are passed as explicit keyword-only arguments, and
+the positional fuel slot accepts `SetFuel`, `AddFuel`, or `None`:
+
+```python
+result = await worker.call_function(
+  """
+await asyncio.sleep(1)
+return add(add(a, b), add(c, d))
+""",
+  AddFuel(500_000, cap=2_000_000),
+  a=1,
+  b=2,
+  c=3,
+  d=4,
+)
+```
+
 ## Limits
 
 Limits belong to an execution:

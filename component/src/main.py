@@ -2,6 +2,7 @@
 import ast
 import asyncio
 import inspect
+import keyword
 import os
 import sys
 import traceback
@@ -46,13 +47,16 @@ async def handle_worker_call(
   request: object,
 ) -> None:
   try:
-    target: object = namespace
-    for part in request.path:
-      target = target[part] if isinstance(target, dict) else getattr(target, part)
     import cbor2
 
     args, kwargs = cbor2.loads(request.arguments)
-    value = target(*args, **kwargs)
+    if request.path:
+      target: object = namespace
+      for part in request.path:
+        target = target[part] if isinstance(target, dict) else getattr(target, part)
+      value = target(*args, **kwargs)
+    else:
+      value = call_function(namespace, *args, **kwargs)
     if inspect.isawaitable(value):
       value = await value
     await host.worker_response(
@@ -62,6 +66,45 @@ async def handle_worker_call(
     )
   except Exception:
     await host.worker_response(request.request_id, b"", traceback.format_exc())
+
+
+async def call_function(
+  namespace: dict[str, object],
+  source: str,
+  **kwargs: object,
+) -> object:
+  for name in kwargs:
+    if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
+      raise ValueError(f"invalid function argument name: {name!r}")
+
+  name = "<worker-function>"
+  parsed = ast.parse(source, filename="<worker-function>", mode="exec")
+  function = ast.AsyncFunctionDef(
+    name=name,
+    args=ast.arguments(
+      posonlyargs=[],
+      args=[],
+      vararg=None,
+      kwonlyargs=[ast.arg(arg=argument) for argument in kwargs],
+      kw_defaults=[None for _ in kwargs],
+      kwarg=None,
+      defaults=[],
+    ),
+    body=parsed.body or [ast.Pass()],
+    decorator_list=[],
+    returns=None,
+    type_comment=None,
+    type_params=[],
+  )
+  module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+  module_code = compile(module, "<worker-function>", "exec")
+  function_code = next(
+    value
+    for value in module_code.co_consts
+    if isinstance(value, types.CodeType) and value.co_name == name
+  )
+  generated = types.FunctionType(function_code, namespace, name)
+  return await generated(**kwargs)
 
 
 async def capture_worker_failure(

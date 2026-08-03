@@ -297,6 +297,40 @@ class TestFacade:
       await worker.close()
       await runtime.close()
 
+  async def test_worker_call_function(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run(
+      """
+import asyncio
+
+def add(a, b):
+  return a + b
+
+def generated_names():
+  return [name for name in globals() if name == '<worker-function>']
+""",
+      limits=RuntimeLimits(timeout=30),
+    )
+    try:
+      with pytest.raises(ValueError, match="worker call path must not be empty"):
+        await worker.call((), None)
+      result = await worker.call_function(
+        """
+await asyncio.sleep(0)
+return add(add(a, b), add(c, d))
+""",
+        None,
+        a=1,
+        b=2,
+        c=3,
+        d=4,
+      )
+      assert result == 10
+      assert await worker.call(("generated_names",), None) == []
+    finally:
+      await worker.close()
+      await runtime.close()
+
   async def test_rpc_preserves_shared_values_in_both_directions(self) -> None:
     runtime = PythonRuntime()
 

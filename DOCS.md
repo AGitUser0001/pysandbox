@@ -163,6 +163,12 @@ calls sequentially or spawn guest asyncio tasks concurrently. Results return as
 `WorkerResponse` frames. Caller-side timeouts stop waiting but deliberately do
 not cancel a guest operation that may already have side effects.
 
+An empty worker-call path represents `Worker.call_function()`. The guest parses
+the unchanged source into AST statements and places them inside an
+`AsyncFunctionDef` with keyword-only parameters. It extracts the resulting code
+object and constructs the callable with the persistent `__main__` namespace as
+its globals, without installing a temporary function in that namespace.
+
 ## Concurrency and Backpressure
 
 The native supervisor dispatches guest RPC and VFS callbacks concurrently under
