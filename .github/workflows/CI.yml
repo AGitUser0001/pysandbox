@@ -352,6 +352,8 @@ jobs:
           python-version: ${{ matrix.platform.python-versions }}
           architecture: ${{ matrix.platform.architecture }}
           allow-prereleases: true
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Find Python 3.12
         if: matrix.platform.regular
         id: python312
