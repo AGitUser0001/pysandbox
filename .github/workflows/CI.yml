@@ -374,7 +374,7 @@ jobs:
         shell: bash
         env:
           PYTHON_VERSIONS: ${{ matrix.platform.python-versions }}
-        run: uv python install $PYTHON_VERSIONS
+        run: uv python install --no-bin $PYTHON_VERSIONS
       - name: Find Python 3.12
         if: matrix.platform.regular
         id: python312
