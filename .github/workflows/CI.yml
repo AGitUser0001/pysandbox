@@ -123,19 +123,19 @@ jobs:
         platform:
           - name: linux-x86_64
             target: x86_64-unknown-linux-gnu
-            manylinux: "2_28"
+            compatibility_args: --compatibility manylinux_2_28
             zig: true
           - name: linux-aarch64
             target: aarch64-unknown-linux-gnu
-            manylinux: "2_28"
+            compatibility_args: --compatibility manylinux_2_28
             zig: true
           - name: windows-x64
             target: x86_64-pc-windows-msvc
-            manylinux: "off"
+            compatibility_args: ""
             zig: false
           - name: windows-aarch64
             target: aarch64-pc-windows-msvc
-            manylinux: "off"
+            compatibility_args: ""
             zig: false
     steps:
       - uses: actions/checkout@v6
@@ -174,10 +174,21 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
+          # cargo-zigbuild includes its executable path in the linker-wrapper
+          # fingerprint. Keep that path stable across Actions runs.
+          CARGO_BIN_EXE_cargo-zigbuild: ${{ github.workspace }}/.ci-tools/maturin-v1.14.1
           MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
           PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
           XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
         with:
+          # Docker builds delete Cargo's restored build-script artifacts before
+          # compiling. Zig supplies the requested glibc compatibility natively.
+          container: "off"
+          before-script-linux: |
+            mkdir -p "$GITHUB_WORKSPACE/.ci-tools"
+            cp "$(command -v maturin)" "$CARGO_BIN_EXE_cargo-zigbuild"
+            chmod +x "$CARGO_BIN_EXE_cargo-zigbuild"
+          maturin-version: v1.14.1
           target: ${{ matrix.platform.target }}
           args: >-
             --release
@@ -189,10 +200,10 @@ jobs:
             python3.14t
             python3.15
             python3.15t
+            ${{ matrix.platform.compatibility_args }}
             ${{ matrix.platform.zig && '--zig' || '' }}
             --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
-          manylinux: ${{ matrix.platform.manylinux }}
       - name: Verify free-threaded wheels
         run: |
           for abi in cp314-cp314t cp315-cp315t; do
@@ -477,6 +488,8 @@ jobs:
           fi
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
       - name: Publish to PyPI
         run: uv publish --trusted-publishing always "wheels-*/*"
       - name: Ensure Git tag and GitHub Release
