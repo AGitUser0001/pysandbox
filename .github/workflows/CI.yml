@@ -325,43 +325,36 @@ jobs:
           - name: linux-x86_64
             label: linux-x86_64
             runner: ubuntu-22.04
-            python-versions: "3.12\n3.14t"
             regular: true
             freethreaded: true
           - name: linux-aarch64
             label: linux-aarch64
             runner: ubuntu-22.04-arm
-            python-versions: "3.12\n3.14t"
             regular: true
             freethreaded: true
           - name: windows-x64
             label: windows-x64
             runner: windows-latest
-            python-versions: "3.12\n3.14t"
             regular: true
             freethreaded: true
           - name: windows-aarch64
             label: windows-aarch64
             runner: windows-11-arm
-            python-versions: "3.12-aarch64\n3.14t-aarch64"
             regular: true
             freethreaded: true
           - name: macos-x86_64
             label: macos-x86_64 (regular)
             runner: macos-26-intel
-            python-versions: "3.12"
             regular: true
             freethreaded: false
           - name: macos-x86_64
             label: macos-x86_64 (free-threaded)
             runner: macos-26-intel
-            python-versions: "3.14t"
             regular: false
             freethreaded: true
           - name: macos-aarch64
             label: macos-aarch64
             runner: macos-latest
-            python-versions: "3.12\n3.14t"
             regular: true
             freethreaded: true
     steps:
@@ -370,25 +363,6 @@ jobs:
         with:
           enable-cache: true
           cache-python: true
-      - name: Install Python interpreters
-        shell: bash
-        env:
-          PYTHON_VERSIONS: ${{ matrix.platform.python-versions }}
-        run: uv python install --no-bin $PYTHON_VERSIONS
-      - name: Find Python 3.12
-        if: matrix.platform.regular
-        id: python312
-        shell: bash
-        env:
-          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.12-aarch64' || '3.12' }}
-        run: echo "python312=$(uv python find --managed-python $PYTHON_REQUEST)" >> "$GITHUB_OUTPUT"
-      - name: Find free-threaded Python
-        if: matrix.platform.freethreaded
-        id: python314t
-        shell: bash
-        env:
-          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.14t-aarch64' || '3.14t' }}
-        run: echo "python314t=$(uv python find --managed-python $PYTHON_REQUEST)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v7
         with:
           name: wheels-${{ matrix.platform.name }}
@@ -397,8 +371,10 @@ jobs:
         if: matrix.platform.regular
         id: regular_environment
         shell: bash
+        env:
+          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.12-aarch64' || '3.12' }}
         run: |
-          uv venv --python '${{ steps.python312.outputs.python312 }}' .test-venv-312
+          uv venv --python "$PYTHON_REQUEST" .test-venv-312
           uv pip install \
             --python .test-venv-312 \
             --prerelease allow \
@@ -421,8 +397,10 @@ jobs:
         if: matrix.platform.freethreaded
         id: freethreaded_environment
         shell: bash
+        env:
+          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.14t-aarch64' || '3.14t' }}
         run: |
-          uv venv --python '${{ steps.python314t.outputs.python314t }}' .test-venv-314t
+          uv venv --python "$PYTHON_REQUEST" .test-venv-314t
           uv pip install \
             --python .test-venv-314t \
             --prerelease allow \
