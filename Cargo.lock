@@ -538,7 +538,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
- "cap-fs-ext 3.4.5",
+ "cap-fs-ext 4.0.2",
  "cap-std 3.4.5",
  "fs-set-times",
  "system-interface",
