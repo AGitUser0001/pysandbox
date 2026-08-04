@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use system_interface::fs::FileIoExt;
 use tokio::sync::RwLock;
 use wasmtime_wasi_io::poll::Pollable;
 use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamResult};
 
+use crate::file_io::PositionalFileIo;
 use crate::storage::VfsStorage;
 
 /// An input stream for reading from a real filesystem file.
@@ -54,7 +54,7 @@ impl InputStream for RealFileInputStream {
         }
 
         let mut buf = vec![0u8; size];
-        match self.file.read_at(&mut buf, self.position) {
+        match self.file.read_at_position(&mut buf, self.position) {
             Ok(0) => {
                 // EOF
                 self.closed = true;
@@ -134,12 +134,12 @@ impl OutputStream for RealFileOutputStream {
             match self.file.metadata() {
                 Ok(meta) => {
                     let len = meta.len();
-                    self.file.write_at(&bytes, len)
+                    self.file.write_at_position(&bytes, len)
                 }
                 Err(e) => Err(e),
             }
         } else {
-            self.file.write_at(&bytes, self.position)
+            self.file.write_at_position(&bytes, self.position)
         };
 
         match result {

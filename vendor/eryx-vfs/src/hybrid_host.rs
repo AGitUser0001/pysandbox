@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use cap_fs_ext::MetadataExt as _;
-use system_interface::fs::FileIoExt;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
 use crate::HybridReaddirIterator;
+use crate::file_io::PositionalFileIo;
 use crate::hybrid::{HybridDescriptor, HybridPreopen, HybridVfsState, RealDir, RealFile};
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
 use crate::storage::VfsStorage;
@@ -350,9 +350,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let file_arc = Arc::clone(&file.file);
                 let guest_path = guest_path.clone();
 
-                // Read from the file at the specified offset using FileIoExt
                 let mut buf = vec![0u8; len as usize];
-                let bytes_read = match file_arc.read_at(&mut buf, offset) {
+                let bytes_read = match file_arc.read_at_position(&mut buf, offset) {
                     Ok(n) => n,
                     Err(e) => {
                         return Err(
@@ -397,8 +396,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let file_arc = Arc::clone(&file.file);
                 let guest_path = guest_path.clone();
 
-                // Write to the file at the specified offset using FileIoExt
-                match file_arc.write_at(&buf, offset) {
+                match file_arc.write_at_position(&buf, offset) {
                     Ok(n) => Ok(n as u64),
                     Err(e) => {
                         Err(crate::VfsError::Io(format!("write {}: {}", guest_path, e)).into())
