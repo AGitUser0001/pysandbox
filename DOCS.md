@@ -34,10 +34,13 @@ handlers, the optional VFS, package manager, local-socket directory, and native
 `SandboxProcess`. `execute()` creates a worker and awaits its task. `run()`
 returns the worker immediately for persistent use.
 
-Each `Worker` has a stable worker ID, a live `RuntimeResult`, and a future for
-the native execution handle. Its task owns execution lifetime. Cancelling or
-closing the worker closes the corresponding daemon worker; calls made after it
-stops fail with `WorkerStoppedError`.
+Each `Worker` has a stable worker ID and stable `RuntimeResult` and `Output`
+objects. A private future only coordinates operations waiting for the native
+execution handle during startup. The worker task owns execution lifetime and
+is solely responsible for closing the corresponding daemon worker. `cancel()`
+requests native cancellation once execution exists, or cancels startup;
+`close()` cancels and joins the task. Calls made after the worker stops fail
+with `WorkerStoppedError`.
 
 If the shared subprocess exits, pending native requests fail and the facade
 discards the closed process. A later operation starts a fresh subprocess.
@@ -125,9 +128,11 @@ The actor configures the Store limits, supplies the program through the WIT host
 interface, and calls the component's async `run` export.
 
 WASI stdout and stderr use custom Wasmtime streams. Writes become labelled
-`Output` frames immediately and are appended to the execution's in-memory
-`Output` sequence in arrival order. The configured output limit applies to the
-combined byte count. A limit violation terminates the execution with
+`Output` frames immediately and are appended to a Rust-owned shared buffer in
+arrival order. The public read-only `Output` sequence reads that buffer lazily,
+so existing references observe new events without copying the complete output.
+Slices are detached `Output` snapshots. The configured output limit applies to
+the combined byte count. A limit violation terminates the execution with
 `TerminationReason.OUTPUT_LIMIT`; captured output remains available.
 
 The final result separates guest-visible diagnostics from infrastructure

@@ -10,6 +10,7 @@ from pysandbox import (
   AddFuel,
   CpuShareConfig,
   Output,
+  OutputEvent,
   PythonRuntime,
   RpcContext,
   RuntimeLimits,
@@ -38,14 +39,34 @@ async def wait_for_event_or_execution(
   await asyncio.gather(event_wait, return_exceptions=True)
   if execution in done:
     result = await execution
+    reason = result.reason
     pytest.fail(
       "execution stopped before reaching expected concurrency: "
-      f"reason={result.reason.value}, error={result.error!r}"
+      f"reason={reason.value if reason is not None else None}, "
+      f"error={result.error!r}"
     )
   pytest.fail("execution did not reach expected concurrency")
 
 
 class TestFacade:
+  def test_output_value_semantics(self) -> None:
+    event = OutputEvent(source="stdout", data=b"hello")
+    same_event = OutputEvent("stdout", b"hello")
+    assert event == same_event
+    assert hash(event) == hash(same_event)
+    assert repr(event) == "OutputEvent(source='stdout', data=b'hello')"
+    assert Output(event for event in [event]) == [same_event]
+
+  async def test_close_before_execution_starts(self) -> None:
+    runtime = PythonRuntime()
+    worker = runtime.run("pass")
+    output = worker.result.output
+    await worker.close()
+    assert worker.task.cancelled()
+    assert worker._execution_ready.done()
+    assert worker.result.output is output
+    assert worker.result.reason is None
+
   @pytest.mark.skipif(not FREE_THREADED, reason="requires free-threaded CPython")
   async def test_shared_runtime_across_python_threads(self) -> None:
     runtime = PythonRuntime()
@@ -64,7 +85,7 @@ class TestFacade:
           )
         )
         assert all(result.reason is TerminationReason.COMPLETED for result in results)
-        return [int(result.stdout) for result in results]
+        return [int(result.output.stdout) for result in results]
 
       return asyncio.run(execute_all())
 
@@ -132,9 +153,12 @@ class TestFacade:
         'print(await host_upper("hello"), flush=True)',
       )
       assert result.error is None
-      assert result.stdout == b"7\nHELLO\n"
-      assert result.text == "7\nHELLO\n"
-      assert isinstance(result.output[:1], Output)
+      assert result.output.stdout == b"7\nHELLO\n"
+      assert result.output.text == "7\nHELLO\n"
+      first_event = result.output[:1]
+      assert isinstance(first_event, Output)
+      assert Output(iter(first_event)) == first_event
+      assert repr(first_event) == repr(list(first_event))
 
       main_module = await runtime.execute(
         "value = 42\n"
@@ -142,7 +166,7 @@ class TestFacade:
         "print(__main__.value, __main__.__dict__ is globals(), flush=True)\n"
       )
       assert main_module.error is None
-      assert main_module.stdout == b"42 True\n"
+      assert main_module.output.stdout == b"42 True\n"
 
       failed = await runtime.execute("raise ValueError('guest failure')")
       assert "ValueError: guest failure" in (failed.error or "")
@@ -161,12 +185,15 @@ class TestFacade:
         'print("ready", flush=True)',
         limits=RuntimeLimits(timeout=30),
       )
+      assert worker.result.reason is None
+      output = worker.result.output
       assert await worker.call(("increment",), None, 5) == 15
+      assert worker.result.output is output
       for _ in range(1_000):
-        if worker.output.stdout == b"ready\n":
+        if worker.result.output.stdout == b"ready\n":
           break
         await asyncio.sleep(0.01)
-      assert worker.output.stdout == b"ready\n"
+      assert worker.result.output.stdout == b"ready\n"
       assert await worker.call(("increment",), None, amount=2) == 17
       call_options = WorkerCallOptions(
         fuel=AddFuel(1_000, cap=2**64 - 1),
@@ -567,12 +594,12 @@ return add(add(a, b), add(c, d))
         "print(await locally_saturated('other'), flush=True)"
       )
       assert unaffected.error is None
-      assert unaffected.stdout == b"other\n"
+      assert unaffected.output.stdout == b"other\n"
 
       release.set()
       saturated_result = await saturated
       assert saturated_result.error is None
-      assert b"guest dispatch request queue is full" in saturated_result.stdout
+      assert b"guest dispatch request queue is full" in saturated_result.output.stdout
     finally:
       release.set()
       if saturated is not None:
@@ -700,17 +727,19 @@ return add(add(a, b), add(c, d))
 
     worker = runtime.run("await wait_forever()")
     try:
-      await asyncio.wait_for(asyncio.shield(worker._execution), timeout=5)
+      await asyncio.wait_for(asyncio.shield(worker._execution_ready), timeout=5)
       sandbox = await runtime._get_sandbox()
       assert runtime.is_open
       await sandbox.terminate()
       with pytest.raises(RuntimeError):
         await asyncio.wait_for(worker.task, timeout=5)
       assert not runtime.is_open
+      await worker.close()
+      assert not runtime.is_open
 
       recovered = await runtime.execute("print('recovered', flush=True)")
       assert recovered.reason == TerminationReason.COMPLETED
-      assert recovered.stdout == b"recovered\n"
+      assert recovered.output.stdout == b"recovered\n"
       assert runtime.is_open
     finally:
       await runtime.close()
@@ -742,7 +771,7 @@ return add(add(a, b), add(c, d))
       )
       assert output_limited.reason == TerminationReason.OUTPUT_LIMIT
       assert output_limited.error == "guest output exceeded 1024 bytes"
-      assert len(output_limited.stdout) == 1024
+      assert len(output_limited.output.stdout) == 1024
 
       memory_limited = await runtime.execute(
         "bytearray(256 * 1024 * 1024)",
@@ -756,7 +785,7 @@ return add(add(a, b), add(c, d))
 
       cancelled_worker = runtime.run("while True:\n  pass", spin=False)
       await asyncio.wait_for(
-        asyncio.shield(cancelled_worker._execution),
+        asyncio.shield(cancelled_worker._execution_ready),
         timeout=5,
       )
       await cancelled_worker.cancel()
@@ -779,7 +808,7 @@ return add(add(a, b), add(c, d))
         assert result.reason == TerminationReason.EXITED
         assert result.exit_code == exit_code
         assert result.error is None
-        assert result.stderr == stderr
+        assert result.output.stderr == stderr
     finally:
       await runtime.close()
 

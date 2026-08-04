@@ -47,7 +47,7 @@ async def main() -> None:
       'print("2 + 5 =", await add(2, 5), flush=True)',
       limits=RuntimeLimits(timeout=30),
     )
-    print(result.text, end="")
+    print(result.output.text, end="")
   finally:
     await runtime.close()
 
@@ -85,7 +85,7 @@ await worker.close()
 ```
 
 The worker preserves its Python globals between calls. `worker.task` resolves
-when the guest exits, and `worker.output` exposes output collected so far.
+when the guest exits, and `worker.result.output` exposes output collected so far.
 Calls made after the worker stops, or still pending when it closes, raise
 `WorkerStoppedError`.
 Worker calls are dispatched concurrently by default. Pass
@@ -194,16 +194,19 @@ epoch interruption remain active when it is disabled.
 stdout and stderr are retained as interlaced output events:
 
 ```python
-print(result.stdout)
-print(result.stderr)
-print(result.text)
+print(result.output.stdout)
+print(result.output.stderr)
+print(result.output.text)
 ```
+
+`result.output` is a live, read-only sequence. Existing references observe new
+worker output as it arrives; slicing it produces a detached `Output` snapshot.
 
 `formatted_text()` can mark transitions between streams:
 
 ```python
 print(
-  result.formatted_text(stderr=(b"\x1b[31m", b"\x1b[0m")),
+  result.output.formatted_text(stderr=(b"\x1b[31m", b"\x1b[0m")),
   end="",
 )
 ```

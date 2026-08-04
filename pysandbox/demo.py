@@ -273,12 +273,12 @@ async def execute_code(runtime: PythonRuntime, source: str) -> None:
 
   typewrite("execution: ok" if result.error is None else "execution: failed")
   typewrite(
-    result.formatted_text(
+    result.output.formatted_text(
       stderr=(f"{RED}[stderr] ".encode(), RESET.encode()),
     ),
     end="",
   )
-  if result.text and not result.text.endswith("\n"):
+  if result.output.text and not result.output.text.endswith("\n"):
     typewrite("")
 
 
@@ -358,7 +358,7 @@ HOST_SNIPPETS: tuple[tuple[str, str, str], ...] = (
             print("hello from guest")
             print("2 + 5 =", await add(a=2, b=5))
             \"\"\", limits=RuntimeLimits(fuel=10_000_000_000, timeout=30))
-                print(result.formatted_text())
+                print(result.output.formatted_text())
                 await runtime.close()
 
             asyncio.run(main())

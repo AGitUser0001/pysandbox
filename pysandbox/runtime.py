@@ -5,14 +5,13 @@ import keyword
 import math
 import sys
 import tempfile
-from collections import UserList
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
-from typing import Self
+from typing import Self, overload
 
 from platformdirs import user_cache_path
 
@@ -127,24 +126,67 @@ class WorkerCallOptions:
   timeout: float | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class OutputEvent:
-  source: str
-  data: bytes
+OutputEvent = _core.OutputEvent
 
 
-class Output(UserList[OutputEvent]):
+class Output(Sequence[OutputEvent]):
+  __slots__ = ("_data", "_native")
+
+  def __init__(
+    self,
+    source: _core.Output | Iterable[OutputEvent] | None = None,
+  ) -> None:
+    if source is None or isinstance(source, _core.Output):
+      self._native = source or _core.Output()
+      self._data = None
+    else:
+      self._native = None
+      self._data = list(source)
+
+  def __len__(self) -> int:
+    return self._native.len() if self._native is not None else len(self._data or ())
+
+  @overload
+  def __getitem__(self, index: int) -> OutputEvent: ...
+
+  @overload
+  def __getitem__(self, index: slice) -> "Output": ...
+
+  def __getitem__(self, index: int | slice) -> "OutputEvent | Output":
+    if isinstance(index, slice):
+      if self._native is not None:
+        start, stop, step = index.indices(len(self))
+        return Output(self._native.get_slice(start, stop, step))
+      assert self._data is not None
+      return Output(self._data[index])
+    if self._native is not None:
+      if index < 0:
+        index += len(self)
+      if index < 0:
+        raise IndexError("output index out of range")
+      return self._native.get_item(index)
+    assert self._data is not None
+    return self._data[index]
+
+  def __repr__(self) -> str:
+    return repr(list(self))
+
+  def __eq__(self, other: object) -> bool:
+    if isinstance(other, Output):
+      return list(self) == list(other)
+    return list(self) == other
+
   @property
   def stdout(self) -> bytes:
-    return b"".join(event.data for event in self.data if event.source == "stdout")
+    return b"".join(event.data for event in self if event.source == "stdout")
 
   @property
   def stderr(self) -> bytes:
-    return b"".join(event.data for event in self.data if event.source == "stderr")
+    return b"".join(event.data for event in self if event.source == "stderr")
 
   @property
   def bytes(self) -> bytes:
-    return b"".join(event.data for event in self.data)
+    return b"".join(event.data for event in self)
 
   @property
   def text(self) -> str:
@@ -160,7 +202,7 @@ class Output(UserList[OutputEvent]):
     data = bytearray()
     current_source: str | None = None
 
-    for event in self.data:
+    for event in self:
       if event.source != current_source:
         if current_source is not None:
           after = affixes[current_source][1]
@@ -194,28 +236,8 @@ class Output(UserList[OutputEvent]):
 class RuntimeResult:
   output: Output = field(default_factory=Output)
   error: str | None = None
-  reason: TerminationReason = TerminationReason.COMPLETED
+  reason: TerminationReason | None = None
   exit_code: int | None = None
-
-  @property
-  def stdout(self) -> bytes:
-    return self.output.stdout
-
-  @property
-  def stderr(self) -> bytes:
-    return self.output.stderr
-
-  @property
-  def text(self) -> str:
-    return self.output.text
-
-  def formatted_text(
-    self,
-    *,
-    stdout: tuple[bytes | None, bytes | None] = (None, None),
-    stderr: tuple[bytes | None, bytes | None] = (None, None),
-  ) -> str:
-    return self.output.formatted_text(stdout=stdout, stderr=stderr)
 
 
 class PythonRuntime:
@@ -486,21 +508,26 @@ class Worker:
     self._limits = limits
     self._rpc_methods = rpc_methods
     self._packages = packages
-    self._execution: asyncio.Future[_core.Execution] = (
+    self._execution_ready: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
+    self._execution: _core.Execution | None = None
     self.task = asyncio.create_task(
       self._execute(),
       name=f"pysandbox-worker-{worker_id}",
     )
+    self.task.add_done_callback(self._task_done)
 
-  @property
-  def output(self) -> Output:
-    if not self._execution.done() or self._execution.cancelled():
-      return self.result.output
-    with suppress(BaseException):
-      return output_from_native(self._execution.result().output)
-    return self.result.output
+  def _task_done(self, _task: asyncio.Task[RuntimeResult]) -> None:
+    if not self._execution_ready.done():
+      self._execution_ready.set_result(None)
+
+  async def _wait_for_execution(self) -> _core.Execution:
+    await self._execution_ready
+    if self._execution is not None:
+      return self._execution
+    await self.task
+    raise WorkerStoppedError("worker execution stopped before starting")
 
   async def call(
     self,
@@ -525,10 +552,12 @@ class Worker:
     if options is not None and options.timeout is not None and options.timeout <= 0:
       raise ValueError("worker call timeout must be positive")
     if self.task.done():
+      reason = self.result.reason
       raise WorkerStoppedError(
-        f"worker execution has stopped ({self.result.reason.value})"
+        "worker execution has stopped"
+        + (f" ({reason.value})" if reason is not None else "")
       )
-    execution = await self._execution
+    execution = await self._wait_for_execution()
     fuel = native_fuel_operation(options.fuel if options is not None else None)
     call = execution.call(path, fuel, *args, **kwargs)
     if options is None or options.timeout is None:
@@ -547,10 +576,10 @@ class Worker:
     return await self._call((), options, source, **kwargs)
 
   async def set_fuel(self, fuel: int) -> None:
-    await (await self._execution).set_fuel(fuel)
+    await (await self._wait_for_execution()).set_fuel(fuel)
 
   async def add_fuel(self, amount: int, *, cap: int | None = None) -> None:
-    await (await self._execution).add_fuel(amount, cap=cap)
+    await (await self._wait_for_execution()).add_fuel(amount, cap=cap)
 
   async def set_limits(
     self,
@@ -563,7 +592,7 @@ class Worker:
   ) -> None:
     if cpu_share_weight is not None and cpu_share_weight <= 0:
       raise ValueError("cpu_share_weight must be positive")
-    await (await self._execution).set_limits(
+    await (await self._wait_for_execution()).set_limits(
       max_memory_bytes=max_memory_bytes,
       max_output_bytes=max_output_bytes,
       max_guest_rpc_bytes=max_guest_rpc_bytes,
@@ -572,66 +601,61 @@ class Worker:
     )
 
   async def cancel(self) -> None:
-    if self._execution.done() and not self._execution.cancelled():
-      await self._execution.result().cancel()
+    if self.task.done():
+      return
+    if self._execution is None:
+      self.task.cancel()
+      return
+    await self._execution.cancel()
 
   async def close(self) -> None:
-    if not self._execution.done():
-      self.task.cancel()
-    else:
-      sandbox = await self.runtime._get_sandbox()
-      with suppress(Exception):
-        await sandbox.close_worker(self.worker_id)
-    with suppress(asyncio.CancelledError, Exception):
-      await self.task
+    with suppress(Exception):
+      await self.cancel()
+    try:
+      await asyncio.shield(self.task)
+    except asyncio.CancelledError:
+      if self.task.cancelled():
+        return
+      raise
+    except Exception:
+      return
 
   async def _execute(self) -> RuntimeResult:
+    sandbox = await self.runtime._get_sandbox()
+    execution = sandbox.run(
+      self._program,
+      worker_id=self.worker_id,
+      rpc_methods=list(self._rpc_methods),
+      package_paths=(
+        [str(path) for path in self._packages.paths]
+        if self._packages is not None
+        else []
+      ),
+      max_memory_bytes=self._limits.max_memory_bytes,
+      max_output_bytes=self._limits.max_output_bytes,
+      max_guest_rpc_bytes=self._limits.max_guest_rpc_bytes,
+      guest_dispatch_request_concurrency=(
+        self._limits.guest_dispatch_request_concurrency
+      ),
+      guest_dispatch_request_queue_capacity=(
+        self._limits.guest_dispatch_request_queue_capacity
+      ),
+      cpu_share_weight=self._limits.cpu_share_weight,
+      fuel=self._limits.fuel,
+      timeout=self._limits.timeout,
+    )
+    self._execution = execution
+    self.result.output._native = execution.output
+    self._execution_ready.set_result(None)
     try:
-      sandbox = await self.runtime._get_sandbox()
-      execution = sandbox.run(
-        self._program,
-        worker_id=self.worker_id,
-        rpc_methods=list(self._rpc_methods),
-        package_paths=(
-          [str(path) for path in self._packages.paths]
-          if self._packages is not None
-          else []
-        ),
-        max_memory_bytes=self._limits.max_memory_bytes,
-        max_output_bytes=self._limits.max_output_bytes,
-        max_guest_rpc_bytes=self._limits.max_guest_rpc_bytes,
-        guest_dispatch_request_concurrency=(
-          self._limits.guest_dispatch_request_concurrency
-        ),
-        guest_dispatch_request_queue_capacity=(
-          self._limits.guest_dispatch_request_queue_capacity
-        ),
-        cpu_share_weight=self._limits.cpu_share_weight,
-        fuel=self._limits.fuel,
-        timeout=self._limits.timeout,
-      )
-      self._execution.set_result(execution)
-      try:
-        native_result = await execution.result()
-        self.result.output = output_from_native(native_result.output)
-        self.result.error = native_result.error
-        self.result.reason = TerminationReason(native_result.reason)
-        self.result.exit_code = native_result.exit_code
-        return self.result
-      finally:
-        with suppress(Exception):
-          await sandbox.close_worker(self.worker_id)
-    except BaseException as error:
-      if not self._execution.done():
-        if isinstance(error, asyncio.CancelledError):
-          self._execution.cancel()
-        else:
-          self._execution.set_exception(error)
-      raise
-
-
-def output_from_native(events: list[_core.OutputEvent]) -> Output:
-  return Output(OutputEvent(source=event.source, data=event.data) for event in events)
+      native_result = await execution.result()
+      self.result.error = native_result.error
+      self.result.reason = TerminationReason(native_result.reason)
+      self.result.exit_code = native_result.exit_code
+      return self.result
+    finally:
+      with suppress(Exception):
+        await sandbox.close_worker(self.worker_id)
 
 
 def native_fuel_operation(

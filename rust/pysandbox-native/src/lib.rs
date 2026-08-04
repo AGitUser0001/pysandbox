@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex as StdMutex,
@@ -11,7 +12,7 @@ use interprocess::local_socket::{
     tokio::{Stream, prelude::*},
 };
 use pyo3::exceptions::{
-    PyAttributeError, PyFileExistsError, PyIsADirectoryError, PyNotADirectoryError,
+    PyAttributeError, PyFileExistsError, PyIndexError, PyIsADirectoryError, PyNotADirectoryError,
     PyNotImplementedError, PyPermissionError, PyRuntimeError, PyValueError,
 };
 use pyo3::prelude::*;
@@ -225,6 +226,12 @@ impl SandboxProcess {
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let output = Arc::new(StdMutex::new(Vec::new()));
+        let native_output = Py::new(
+            py,
+            NativeOutput {
+                output: output.clone(),
+            },
+        )?;
         let (result_sender, result) = watch::channel(None);
         let (ready_sender, ready) = watch::channel(false);
         let requests = self.requests.clone();
@@ -275,104 +282,12 @@ impl SandboxProcess {
                 execution_id: request_id,
                 requests: self.requests.clone(),
                 next_request_id: self.next_request_id.clone(),
-                output,
+                native_output,
                 ready,
                 result,
                 shutdown: self.shutdown.subscribe(),
             },
         )
-    }
-
-    #[pyo3(signature = (
-        program,
-        *,
-        worker_id = 0,
-        rpc_methods = Vec::new(),
-        package_paths = Vec::new(),
-        max_memory_bytes = 128 * 1024 * 1024,
-        max_output_bytes = 256 * 1024,
-        max_guest_rpc_bytes = 10 * 1024 * 1024,
-        guest_dispatch_request_concurrency = 16,
-        guest_dispatch_request_queue_capacity = 64,
-        cpu_share_weight = 1,
-        fuel = u64::MAX,
-        timeout = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn execute<'py>(
-        &self,
-        py: Python<'py>,
-        program: String,
-        worker_id: u64,
-        rpc_methods: Vec<String>,
-        package_paths: Vec<PathBuf>,
-        max_memory_bytes: u64,
-        max_output_bytes: u64,
-        max_guest_rpc_bytes: u64,
-        guest_dispatch_request_concurrency: u64,
-        guest_dispatch_request_queue_capacity: u64,
-        cpu_share_weight: u64,
-        fuel: u64,
-        timeout: Option<f64>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let requests = self.requests.clone();
-        let closed = self.closed.clone();
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let timeout_ms = timeout_milliseconds(timeout)?;
-        validate_guest_dispatch_limits(
-            guest_dispatch_request_concurrency,
-            guest_dispatch_request_queue_capacity,
-        )?;
-        validate_cpu_share_weight(cpu_share_weight)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            if closed.load(Ordering::Acquire) {
-                return Err(PyRuntimeError::new_err("sandbox process is closed"));
-            }
-
-            let payload = encode_payload(&ExecuteRequest {
-                program,
-                rpc_methods,
-                package_paths: package_paths
-                    .into_iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect(),
-                limits: ExecutionLimits {
-                    max_memory_bytes,
-                    max_output_bytes,
-                    max_guest_rpc_bytes,
-                    guest_dispatch_request_concurrency,
-                    guest_dispatch_request_queue_capacity,
-                    cpu_share_weight,
-                    fuel,
-                    timeout_ms,
-                },
-            })
-            .map_err(runtime_error)?;
-            let output = Arc::new(StdMutex::new(Vec::new()));
-            let (ready, _ready_receiver) = watch::channel(false);
-            let result = execute_request(
-                &requests,
-                worker_id,
-                request_id,
-                payload,
-                output.clone(),
-                ready,
-            )
-            .await?;
-
-            Python::attach(|py| {
-                Py::new(
-                    py,
-                    NativeExecutionResult {
-                        error: result.error,
-                        reason: termination_reason_name(result.reason).into(),
-                        exit_code: result.exit_code,
-                        output: output_snapshot(&output),
-                    },
-                )
-            })
-        })
     }
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1863,10 +1778,6 @@ async fn execute_request(
     decode_payload(&response.frame.payload).map_err(runtime_error)
 }
 
-fn output_snapshot(output: &SharedOutput) -> Vec<OutputPayload> {
-    output.lock().expect("output lock poisoned").clone()
-}
-
 fn termination_reason_name(reason: TerminationReason) -> &'static str {
     match reason {
         TerminationReason::Completed => "completed",
@@ -1888,7 +1799,7 @@ struct NativeExecution {
     execution_id: u64,
     requests: mpsc::Sender<ConnectionRequest>,
     next_request_id: Arc<AtomicU64>,
-    output: SharedOutput,
+    native_output: Py<NativeOutput>,
     ready: watch::Receiver<bool>,
     result: watch::Receiver<Option<Result<pysandbox_protocol::ExecuteResult, String>>>,
     shutdown: watch::Receiver<bool>,
@@ -1902,14 +1813,14 @@ impl NativeExecution {
     }
 
     #[getter]
-    fn output(&self, py: Python<'_>) -> PyResult<Vec<Py<NativeOutputEvent>>> {
-        output_events(py, &output_snapshot(&self.output))
+    fn output(&self, py: Python<'_>) -> Py<NativeOutput> {
+        self.native_output.clone_ref(py)
     }
 
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let mut result = self.result.clone();
         let mut shutdown = self.shutdown.clone();
-        let output = self.output.clone();
+        let output = self.native_output.clone_ref(py);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             loop {
                 if let Some(outcome) = result.borrow().clone() {
@@ -1921,7 +1832,7 @@ impl NativeExecution {
                                 error: result.error,
                                 reason: termination_reason_name(result.reason).into(),
                                 exit_code: result.exit_code,
-                                output: output_snapshot(&output),
+                                output: output.clone_ref(py),
                             },
                         )
                     });
@@ -2171,14 +2082,91 @@ async fn wait_until_execution_ready(
     }
 }
 
-#[pyclass(name = "OutputEvent", frozen)]
+#[derive(Eq, Hash, PartialEq)]
+#[pyclass(name = "OutputEvent", frozen, module = "pysandbox._core")]
 struct NativeOutputEvent {
     source: &'static str,
     data: Vec<u8>,
 }
 
+#[pyclass(name = "Output", frozen)]
+struct NativeOutput {
+    output: SharedOutput,
+}
+
+#[pymethods]
+impl NativeOutput {
+    #[new]
+    fn new() -> Self {
+        Self {
+            output: SharedOutput::default(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.output.lock().expect("output lock poisoned").len()
+    }
+
+    fn get_item(&self, py: Python<'_>, index: usize) -> PyResult<Py<NativeOutputEvent>> {
+        let event = self
+            .output
+            .lock()
+            .expect("output lock poisoned")
+            .get(index)
+            .cloned()
+            .ok_or_else(|| PyIndexError::new_err("output index out of range"))?;
+        output_event(py, event)
+    }
+
+    fn get_slice(
+        &self,
+        py: Python<'_>,
+        start: isize,
+        stop: isize,
+        step: isize,
+    ) -> PyResult<Vec<Py<NativeOutputEvent>>> {
+        if step == 0 {
+            return Err(PyValueError::new_err("slice step cannot be zero"));
+        }
+        let mut events = Vec::new();
+        {
+            let output = self.output.lock().expect("output lock poisoned");
+            let mut index = start;
+            while if step > 0 { index < stop } else { index > stop } {
+                let event = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| output.get(index))
+                    .cloned()
+                    .ok_or_else(|| PyIndexError::new_err("output index out of range"))?;
+                events.push(event);
+                index = index
+                    .checked_add(step)
+                    .ok_or_else(|| PyIndexError::new_err("output slice index overflow"))?;
+            }
+        }
+        events
+            .into_iter()
+            .map(|event| output_event(py, event))
+            .collect()
+    }
+}
+
 #[pymethods]
 impl NativeOutputEvent {
+    #[new]
+    fn new(source: &str, data: Vec<u8>) -> PyResult<Self> {
+        let source = match source {
+            "stdout" => "stdout",
+            "stderr" => "stderr",
+            _ => {
+                return Err(PyValueError::new_err(
+                    "output source must be 'stdout' or 'stderr'",
+                ));
+            }
+        };
+        Ok(Self { source, data })
+    }
+
     #[getter]
     fn source(&self) -> &'static str {
         self.source
@@ -2188,6 +2176,25 @@ impl NativeOutputEvent {
     fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.data)
     }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let data = PyBytes::new(py, &self.data).repr()?.extract::<String>()?;
+        Ok(format!(
+            "OutputEvent(source='{}', data={data})",
+            self.source
+        ))
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    fn __hash__(&self) -> isize {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        let hash = hasher.finish() as isize;
+        if hash == -1 { -2 } else { hash }
+    }
 }
 
 #[pyclass(name = "ExecutionResult", frozen)]
@@ -2195,7 +2202,7 @@ struct NativeExecutionResult {
     error: Option<String>,
     reason: String,
     exit_code: Option<i32>,
-    output: Vec<OutputPayload>,
+    output: Py<NativeOutput>,
 }
 
 #[pymethods]
@@ -2216,53 +2223,22 @@ impl NativeExecutionResult {
     }
 
     #[getter]
-    fn output(&self, py: Python<'_>) -> PyResult<Vec<Py<NativeOutputEvent>>> {
-        output_events(py, &self.output)
-    }
-
-    #[getter]
-    fn stdout<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(
-            py,
-            &self
-                .output
-                .iter()
-                .filter(|event| event.source == OutputSource::Stdout)
-                .flat_map(|event| event.data.iter().copied())
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    #[getter]
-    fn stderr<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(
-            py,
-            &self
-                .output
-                .iter()
-                .filter(|event| event.source == OutputSource::Stderr)
-                .flat_map(|event| event.data.iter().copied())
-                .collect::<Vec<_>>(),
-        )
+    fn output(&self, py: Python<'_>) -> Py<NativeOutput> {
+        self.output.clone_ref(py)
     }
 }
 
-fn output_events(py: Python<'_>, output: &[OutputPayload]) -> PyResult<Vec<Py<NativeOutputEvent>>> {
-    output
-        .iter()
-        .map(|event| {
-            Py::new(
-                py,
-                NativeOutputEvent {
-                    source: match event.source {
-                        OutputSource::Stdout => "stdout",
-                        OutputSource::Stderr => "stderr",
-                    },
-                    data: event.data.clone(),
-                },
-            )
-        })
-        .collect()
+fn output_event(py: Python<'_>, event: OutputPayload) -> PyResult<Py<NativeOutputEvent>> {
+    Py::new(
+        py,
+        NativeOutputEvent {
+            source: match event.source {
+                OutputSource::Stdout => "stdout",
+                OutputSource::Stderr => "stderr",
+            },
+            data: event.data,
+        },
+    )
 }
 
 async fn connect_to_sandbox(child: &mut Child, socket_name: &str) -> PyResult<Stream> {
@@ -2346,6 +2322,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_class::<NativeExecution>()?;
     module.add_class::<NativeExecutionResult>()?;
+    module.add_class::<NativeOutput>()?;
     module.add_class::<NativeOutputEvent>()?;
     module.add_class::<RpcContext>()?;
     module.add_class::<SandboxProcess>()?;

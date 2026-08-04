@@ -305,7 +305,10 @@ print(
       await runtime.close()
 
     assert result.reason == TerminationReason.COMPLETED
-    assert result.text == "/python/lib/python3.14/site-packages/cbor2/__init__.py\n[]\n"
+    assert (
+      result.output.text
+      == "/python/lib/python3.14/site-packages/cbor2/__init__.py\n[]\n"
+    )
 
   async def _check_guest_import(self, *, single_file: bool) -> None:
     wheel = make_wheel(self.root, "example", "1.0", single_file=single_file)
@@ -324,7 +327,7 @@ print(
       await runtime.close()
 
     assert result.reason == TerminationReason.COMPLETED
-    assert result.text == "1.0\n"
+    assert result.output.text == "1.0\n"
 
 
 def make_wheel(

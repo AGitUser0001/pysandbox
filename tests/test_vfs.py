@@ -311,7 +311,7 @@ class TestVfs:
         "print(open('/editable.txt').read(), flush=True)",
       )
       assert refreshed.error is None
-      assert refreshed.stdout == b"replacement\n"
+      assert refreshed.output.stdout == b"replacement\n"
       assert vfs.calls.count(("stat", "/editable.txt")) >= 2
     finally:
       await runtime.close()
@@ -362,7 +362,7 @@ class TestVfs:
         "import hello\nprint(hello.value, flush=True)",
       )
       assert recovered.error is None
-      assert recovered.stdout == b"42\n"
+      assert recovered.output.stdout == b"42\n"
     finally:
       release.set()
       pending = [first] if first is not None else []
@@ -385,7 +385,7 @@ class TestVfs:
         "import late\nprint(late.value, flush=True)",
       )
       assert available.error is None
-      assert available.stdout == b"7\n"
+      assert available.output.stdout == b"7\n"
     finally:
       await runtime.close()
 
@@ -410,7 +410,7 @@ class TestVfs:
         "import late\nprint(late.value, flush=True)",
       )
       assert available.error is None
-      assert available.stdout == b"8\n"
+      assert available.output.stdout == b"8\n"
     finally:
       await cached_runtime.close()
 
@@ -424,7 +424,7 @@ class TestVfs:
         "print(hello.value, sys.dont_write_bytecode, flush=True)\n",
       )
       assert result.error is None, vfs.calls
-      assert result.stdout == b"42 True\n"
+      assert result.output.stdout == b"42 True\n"
 
       initial_reads = vfs.calls.count(("read", "/hello.py"))
       second = await runtime.execute(
@@ -441,7 +441,7 @@ class TestVfs:
         "import sys\nimport hello\nprint(hello.value, flush=True)\n",
       )
       assert third.error is None
-      assert third.stdout == b"84\n"
+      assert third.output.stdout == b"84\n"
       assert vfs.calls.count(("read", "/hello.py")) == initial_reads + 1
 
       readonly = await runtime.execute("open('/created.txt', 'w')")
@@ -467,20 +467,20 @@ class TestVfs:
           "import package\nprint(package.value, flush=True)",
         )
         assert first.error is None
-        assert first.stdout == b"1\n"
+        assert first.output.stdout == b"1\n"
 
         value_file.write_text("value = 2\n", encoding="utf-8")
         cached = await runtime.execute(
           "import package\nprint(package.value, flush=True)",
         )
         assert cached.error is None
-        assert cached.stdout == b"1\n"
+        assert cached.output.stdout == b"1\n"
 
         await runtime.invalidate_vfs("/package")
         refreshed = await runtime.execute(
           "import package\nprint(package.value, flush=True)",
         )
         assert refreshed.error is None
-        assert refreshed.stdout == b"2\n"
+        assert refreshed.output.stdout == b"2\n"
       finally:
         await runtime.close()
