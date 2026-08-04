@@ -12,7 +12,7 @@ anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
 cap-fs-ext = "3"
-cap-std = "3"
+cap-std = "4"
 fs-set-times = "0.20"
 system-interface = { version = "0.27", features = ["cap_std_impls"] }
 thiserror = "2"
