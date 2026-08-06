@@ -15,7 +15,7 @@ strip = true
 [workspace.package]
 edition = "2024"
 rust-version = "1.94"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1"
