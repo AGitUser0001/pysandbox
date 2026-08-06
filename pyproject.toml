@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox-wasi"
-version = "1.6.1"
+version = "1.6.2"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 license = "Apache-2.0"
