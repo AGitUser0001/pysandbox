@@ -4,6 +4,7 @@ version = "1.6.1"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE.md"]
 authors = [
     { name = "t8945", email = "123198477+AGitUser0001@users.noreply.github.com" },
 ]
@@ -12,7 +13,6 @@ keywords = ["sandbox", "python", "wasm", "wasi", "wasmtime"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
