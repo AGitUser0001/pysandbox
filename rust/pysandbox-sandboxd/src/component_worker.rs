@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
-use eryx_vfs::{HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir, add_hybrid_vfs_to_linker};
+use eryx_vfs::{
+    HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir, add_hybrid_vfs_to_linker,
+    hybrid_filesystem_wasi_version,
+};
 use pysandbox_protocol::{Frame, FrameKind, FuelOperation, RpcCall, encode_payload};
 use tokio::io::AsyncWrite;
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
@@ -970,6 +973,7 @@ impl ComponentRuntime {
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         if hybrid_filesystem {
+            validate_hybrid_filesystem_imports(&component, &engine)?;
             linker.allow_shadowing(true);
             add_hybrid_vfs_to_linker(&mut linker)?;
             linker.allow_shadowing(false);
@@ -986,6 +990,29 @@ impl ComponentRuntime {
             cpu_share: CpuShare::start(cpu_share_config),
         })
     }
+}
+
+fn validate_hybrid_filesystem_imports(component: &Component, engine: &Engine) -> Result<()> {
+    let version = hybrid_filesystem_wasi_version();
+    let imports: HashSet<_> = component
+        .component_type()
+        .imports(engine)
+        .map(|(name, _)| name.to_owned())
+        .collect();
+    for interface in ["types", "preopens"] {
+        let expected = format!("wasi:filesystem/{interface}@{version}");
+        if !imports.contains(&expected) {
+            let actual: Vec<_> = imports
+                .iter()
+                .filter(|name| name.starts_with(&format!("wasi:filesystem/{interface}@")))
+                .collect();
+            bail!(
+                "component imports {actual:?}, but the hybrid VFS shadows {expected}; \
+                 align the vendored WASI WIT bindings with componentize-py"
+            );
+        }
+    }
+    Ok(())
 }
 
 impl ComponentWorker {

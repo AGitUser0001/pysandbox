@@ -7,6 +7,9 @@ license = "MIT"
 description = "Vendored WASI filesystem bindings used by pysandbox"
 publish = false
 
+[build-dependencies]
+wasmparser = "0.252"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"

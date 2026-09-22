@@ -13,6 +13,10 @@ use crate::hybrid_bindings::{
 use crate::storage::VfsStorage;
 use crate::wasi_impl::VfsState;
 
+pub fn hybrid_filesystem_wasi_version() -> &'static str {
+    env!("ERYX_VFS_FILESYSTEM_WASI_VERSION")
+}
+
 /// Marker trait for types that provide VFS access.
 ///
 /// This trait is used to get access to the VFS context from the store state.

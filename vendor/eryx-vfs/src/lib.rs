@@ -30,12 +30,11 @@
 
 #![deny(unsafe_code)]
 
-mod bindings;
+include!(concat!(env!("OUT_DIR"), "/binding_modules.rs"));
 mod error;
 mod file_io;
 mod host;
 pub mod hybrid;
-mod hybrid_bindings;
 mod hybrid_host;
 mod linker;
 pub mod scrubbing;
@@ -48,7 +47,10 @@ pub use hybrid::{
     HybridDescriptor, HybridPreopen, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RestrictedDir,
 };
 pub use hybrid_bindings::HybridReaddirIterator;
-pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
+pub use linker::{
+    HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker,
+    hybrid_filesystem_wasi_version,
+};
 pub use scrubbing::{
     FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
 };
