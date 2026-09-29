@@ -8,7 +8,7 @@ description = "Vendored WASI filesystem bindings used by pysandbox"
 publish = false
 
 [build-dependencies]
-wasmparser = "0.252"
+wasmparser = "0.258"
 
 [dependencies]
 anyhow = "1"
