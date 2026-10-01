@@ -14,7 +14,7 @@ strip = true
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 license = "Apache-2.0"
 
 [workspace.dependencies]
@@ -43,5 +43,5 @@ tokio = { version = "1", features = [
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-wasmtime = "47.0.4"
-wasmtime-wasi = { version = "47.0.4", features = ["p3"] }
+wasmtime = "48.0.3"
+wasmtime-wasi = { version = "48.0.3", features = ["p3"] }

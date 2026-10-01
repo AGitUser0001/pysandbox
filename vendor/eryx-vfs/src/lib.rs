@@ -57,5 +57,18 @@ pub use scrubbing::{
 pub use storage::{ArcStorage, DirEntry, InMemoryStorage, Metadata, VfsStorage};
 pub use wasi_impl::{VfsCtx, VfsDescriptor, VfsReaddirIterator, VfsState};
 
-// Re-export permission types from wasmtime-wasi for convenience
-pub use wasmtime_wasi::{DirPerms, FilePerms};
+// Keep separate VFS directory and file permissions after Wasmtime 48 replaced
+// its permission flags with FsPerms.
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct DirPerms: usize {
+        const READ = 0b1;
+        const MUTATE = 0b10;
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct FilePerms: usize {
+        const READ = 0b1;
+        const WRITE = 0b10;
+    }
+}

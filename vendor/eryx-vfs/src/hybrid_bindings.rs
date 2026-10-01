@@ -158,8 +158,8 @@ pub use generated::wasi::filesystem::{preopens, types};
 /// Result type for hybrid VFS filesystem operations.
 pub type HybridFsResult<T> = Result<T, HybridFsError>;
 
-// Re-export wasmtime-wasi types that we need
-pub use wasmtime_wasi::{DirPerms, FilePerms};
+// Re-export VFS permission types
+pub use crate::{DirPerms, FilePerms};
 
 use wasmtime::component::HasData;
 

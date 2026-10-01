@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use eryx_vfs::{
-    HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir, add_hybrid_vfs_to_linker,
-    hybrid_filesystem_wasi_version,
+    DirPerms, FilePerms, HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir,
+    add_hybrid_vfs_to_linker, hybrid_filesystem_wasi_version,
 };
 use pysandbox_protocol::{Frame, FrameKind, FuelOperation, RpcCall, encode_payload};
 use tokio::io::AsyncWrite;
@@ -24,7 +24,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::cpu_share::{CpuShare, CpuShareConfig, CpuShareWorker};
 use crate::remote_vfs::RemoteVfs;
@@ -1035,6 +1035,7 @@ impl ComponentWorker {
             control_receiver,
             worker_call_receiver,
             package_paths,
+            FsPerms::ReadOnly,
             DirPerms::READ,
             FilePerms::READ,
         )
@@ -1050,6 +1051,7 @@ impl ComponentWorker {
         control_receiver: mpsc::UnboundedReceiver<ControlMessage>,
         worker_call_receiver: mpsc::Receiver<WorkerCallMessage>,
         package_paths: &[String],
+        python_fs_perms: FsPerms,
         python_dir_perms: DirPerms,
         python_file_perms: FilePerms,
     ) -> Result<Self> {
@@ -1066,7 +1068,7 @@ impl ComponentWorker {
             source: OutputSource::Stderr,
         });
         if !runtime.hybrid_filesystem {
-            wasi.preopened_dir(python_root, "/python", python_dir_perms, python_file_perms)?;
+            wasi.preopened_dir(python_root, "/python", python_fs_perms)?;
         }
         let wasi = wasi.build();
         let vfs = python_vfs(
@@ -1248,6 +1250,7 @@ async fn run_build_program(
         control_receiver,
         worker_call_receiver,
         &[],
+        FsPerms::ReadWrite,
         DirPerms::all(),
         FilePerms::all(),
     )
