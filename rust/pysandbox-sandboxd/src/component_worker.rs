@@ -1202,13 +1202,12 @@ impl ComponentWorker {
 pub async fn compile_python_root(component_path: &Path, python_root: &Path) -> Result<()> {
     let mut files = Vec::new();
     collect_python_files(python_root, python_root, &mut files)?;
-    let mut program = String::from(
-        "import sys\nsys.dont_write_bytecode = True\nimport py_compile\nfor path in (\n",
-    );
+    let mut program = String::from(include_str!("compile_stdlib.py"));
+    program.push_str("\ncompile_files((\n");
     for file in files {
         program.push_str(&format!("  {file:?},\n"));
     }
-    program.push_str("):\n  py_compile.compile(path, doraise=True)\n");
+    program.push_str("))\n");
 
     let (result, output) = run_build_program(component_path, python_root, program).await?;
     result.map_err(|error| {
