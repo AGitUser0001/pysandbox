@@ -49,6 +49,89 @@ async def wait_for_event_or_execution(
 
 
 class TestFacade:
+  @pytest.mark.parametrize(
+    "program",
+    [
+      """
+import asyncio
+import time
+loop = asyncio.get_running_loop()
+started = loop.time()
+assert await asyncio.sleep(0.03, result=42) == 42
+assert loop.time() - started >= 0.02
+assert abs(loop.time() - time.monotonic()) < 1
+assert await asyncio.gather(asyncio.sleep(0.02, result=1), asyncio.sleep(0.01, result=2)) == [1, 2]
+""",
+      """
+import asyncio
+try:
+  await asyncio.wait_for(asyncio.sleep(30), 0.02)
+except TimeoutError:
+  pass
+else:
+  raise AssertionError('wait_for did not time out')
+try:
+  async with asyncio.timeout(0.02):
+    await asyncio.sleep(30)
+except TimeoutError:
+  pass
+else:
+  raise AssertionError('timeout did not expire')
+assert await asyncio.wait_for(asyncio.sleep(0.01, result=42), 30) == 42
+""",
+      """
+import asyncio
+import contextvars
+loop = asyncio.get_running_loop()
+events = []
+cancelled = loop.call_later(30, events.append, 'cancelled')
+cancelled.cancel()
+cancelled.cancel()
+variable = contextvars.ContextVar('timer-value', default='unset')
+variable.set('scheduled')
+context = contextvars.copy_context()
+variable.set('changed')
+loop.call_at(loop.time() - 1, lambda: events.append(variable.get()), context=context)
+await asyncio.sleep(0.02)
+assert events == ['scheduled'], events
+cancelled = loop.call_later(30, events.append, 'cancelled')
+await asyncio.sleep(0)
+cancelled.cancel()
+task = asyncio.create_task(asyncio.sleep(30))
+await asyncio.sleep(0)
+task.cancel()
+try:
+  await task
+except asyncio.CancelledError:
+  pass
+await asyncio.sleep(0.01)
+assert events == ['scheduled'], events
+finished = asyncio.Event()
+async def delayed_callback():
+  await asyncio.sleep(0.01)
+  finished.set()
+loop.call_later(0.01, lambda: asyncio.create_task(delayed_callback()), context=contextvars.Context())
+await finished.wait()
+""",
+      """
+import asyncio
+loop = asyncio.get_running_loop()
+loop.call_later(30, print, 'should not run')
+loop.call_at(float('inf'), print, 'should not run')
+await asyncio.sleep(0.01)
+""",
+    ],
+    ids=["sleep-and-concurrency", "timeouts", "callbacks-and-cancellation", "cleanup"],
+  )
+  async def test_guest_asyncio_timers(self, program: str) -> None:
+    runtime = PythonRuntime()
+    try:
+      result = await runtime.execute(program, limits=RuntimeLimits(timeout=5))
+      assert result.reason == TerminationReason.COMPLETED, result.error
+      assert result.output.stdout == b""
+    finally:
+      await runtime.close()
+
   def test_output_value_semantics(self) -> None:
     event = OutputEvent(source="stdout", data=b"hello")
     same_event = OutputEvent("stdout", b"hello")
@@ -343,7 +426,7 @@ def generated_names():
         await worker.call((), None)
       result = await worker.call_function(
         """
-await asyncio.sleep(0)
+await asyncio.sleep(0.01)
 return add(add(a, b), add(c, d))
 """,
         None,

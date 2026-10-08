@@ -9,6 +9,7 @@ import traceback
 import types
 
 import wit_world
+from _pysandbox_asyncio import close_timers, install_timers
 from componentize_py_types import Err
 from wit_world.imports import host
 
@@ -177,6 +178,7 @@ class WitWorld(wit_world.WitWorld):
 
   def initialize(self) -> None:
     try:
+      install_timers()
       configure_sys_path()
       sys.meta_path.insert(0, UnsupportedExtensionFinder())
       __import__("cbor2")
@@ -209,3 +211,5 @@ class WitWorld(wit_world.WitWorld):
       os._exit(code)
     except BaseException:
       raise Err(traceback.format_exc())
+    finally:
+      await close_timers()

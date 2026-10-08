@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -606,6 +606,7 @@ struct ComponentState {
     rpc_methods: HashSet<String>,
     max_guest_rpc_bytes: usize,
     cpu_share: Arc<CpuShareWorker>,
+    timers: HashMap<u64, oneshot::Sender<()>>,
 }
 
 struct ExecutionStoreLimits {
@@ -774,9 +775,34 @@ impl pysandbox::python::host::Host for ComponentState {
     async fn program(&mut self) -> String {
         self.program.clone()
     }
+
+    async fn cancel_timer(&mut self, id: u64) {
+        if let Some(sender) = self.timers.remove(&id) {
+            let _ = sender.send(());
+        }
+    }
 }
 
 impl pysandbox::python::host::HostWithStore<ComponentState> for HasSelf<ComponentState> {
+    async fn wait_timer(accessor: &Accessor<ComponentState, Self>, id: u64, delay: f64) {
+        let (sender, receiver) = oneshot::channel();
+        accessor.with(|mut access| access.get().timers.insert(id, sender));
+        let deadline = Duration::try_from_secs_f64(delay.max(0.0))
+            .ok()
+            .and_then(|duration| Instant::now().checked_add(duration));
+        let wait = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            () = wait => {},
+            _ = receiver => {},
+        }
+        accessor.with(|mut access| access.get().timers.remove(&id));
+    }
+
     async fn call(
         accessor: &Accessor<ComponentState, Self>,
         method: String,
@@ -1095,6 +1121,7 @@ impl ComponentWorker {
                 rpc_methods: HashSet::new(),
                 max_guest_rpc_bytes: 10 * 1024 * 1024,
                 cpu_share: cpu_share.clone(),
+                timers: HashMap::new(),
             },
         );
         store.limiter(|state| &mut state.limits);
