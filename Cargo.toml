@@ -45,7 +45,3 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 wasmtime = "50"
 wasmtime-wasi = { version = "50", features = ["p3"] }
-
-[patch.crates-io]
-zstd = { package = "zstd", version = "0.14.3" }
-zstd-safe = { package = "zstd-safe", version = "8.2.0" }
