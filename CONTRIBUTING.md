@@ -4,7 +4,7 @@
 
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
-- Stable Rust 1.95 or newer
+- Stable Rust 1.99 or newer
 - Node.js and `npx` for Pyright
 - `cargo-deny` for dependency policy checks
 

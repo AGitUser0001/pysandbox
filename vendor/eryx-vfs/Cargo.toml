@@ -2,7 +2,7 @@
 name = "eryx-vfs"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.99"
 license = "MIT"
 description = "Vendored WASI filesystem bindings used by pysandbox"
 publish = false
@@ -21,6 +21,6 @@ fs-set-times = "0.20"
 thiserror = "2"
 tokio = { version = "1", features = ["full", "sync"] }
 tracing = "0.1"
-wasmtime = { version = "48.0.3", features = ["component-model", "async"] }
-wasmtime-wasi = "48.0.3"
-wasmtime-wasi-io = "48.0.3"
+wasmtime = { version = "50", features = ["component-model", "async"] }
+wasmtime-wasi = "50"
+wasmtime-wasi-io = "50"
