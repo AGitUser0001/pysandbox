@@ -20,7 +20,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{
     AsContextMut, Cache, CacheConfig, Config, Engine, ResourceLimiter, Store, StoreContextMut,
-    StoreLimits, StoreLimitsBuilder, UpdateDeadline,
+    StoreHookState, StoreLimits, StoreLimitsBuilder, UpdateDeadline,
 };
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
@@ -1127,7 +1127,8 @@ impl ComponentWorker {
         store.limiter(|state| &mut state.limits);
         let control_state = control.state.clone();
         let epoch_cpu_share = cpu_share.clone();
-        store.epoch_deadline_callback(move |mut store| {
+        store.epoch_deadline_callback(move |store| {
+            let mut store = hook_state_as_context_mut(store);
             let updated = apply_pending_store_updates(store.as_context_mut(), &control_state);
             if let Ok(fuel) = store.get_fuel() {
                 epoch_cpu_share.observe_fuel(fuel);
@@ -1351,6 +1352,20 @@ fn python_vfs(
     }
     vfs.add_real_preopen("/python", python);
     Ok(vfs)
+}
+
+/// Recovers mutable store access inside an epoch deadline callback.
+///
+/// Wasmtime 50 hands epoch callbacks a read-only `StoreHookState`, but we must
+/// still adjust fuel there (as wasmtime 49 allowed). `StoreHookState` is a
+/// single-field wrapper around `StoreContextMut`; `transmute` fails to compile
+/// if their sizes ever diverge. Only fuel and host data are touched through it.
+fn hook_state_as_context_mut<'a>(
+    state: StoreHookState<'a, ComponentState>,
+) -> StoreContextMut<'a, ComponentState> {
+    // SAFETY: `StoreHookState<'a, T>` is `struct { inner: StoreContextMut<'a, T> }`
+    // in wasmtime 50, so both types share one layout and lifetime.
+    unsafe { std::mem::transmute(state) }
 }
 
 fn apply_pending_store_updates(

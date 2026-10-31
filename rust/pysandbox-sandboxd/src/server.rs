@@ -91,9 +91,13 @@ async fn serve_connection(
     cpu_share_sample_interval: Duration,
     cpu_share_activity_timeout: Duration,
 ) -> anyhow::Result<()> {
-    let (mut reader, mut writer) = connection.split();
+    // `&Stream` implements `AsyncRead` and `AsyncWrite`, so share it instead of splitting.
+    let connection = Arc::new(connection);
+    let writer_connection = connection.clone();
+    let mut reader = &*connection;
     let (outgoing, mut outgoing_receiver) = mpsc::channel::<Frame>(256);
     let writer_task = tokio::spawn(async move {
+        let mut writer = &*writer_connection;
         while let Some(frame) = outgoing_receiver.recv().await {
             write_frame(&mut writer, &frame).await?;
         }

@@ -343,7 +343,9 @@ async fn sample_cpu(scheduler: Weak<CpuShare>, sample_interval: Duration) {
     let Ok(pid) = sysinfo::get_current_pid() else {
         return;
     };
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        return;
+    };
     let refresh = ProcessRefreshKind::nothing().with_cpu();
     refresh_process(&mut system, pid, refresh);
 
