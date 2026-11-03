@@ -4,6 +4,12 @@ all-features = true
 [advisories]
 unmaintained = "workspace"
 
+ignore = [
+    { id = "RUSTSEC-2026-0391", reason = "Fixed in wasmtime main; waiting for next release/backport", expiry = "P30D" },
+    { id = "RUSTSEC-2026-0398", reason = "Fixed in wasmtime main; waiting for next release/backport", expiry = "P30D" },
+    { id = "RUSTSEC-2026-0403", reason = "Fixed in wasmtime main; waiting for next release/backport", expiry = "P30D" },
+]
+
 [licenses]
 allow = [
     "0BSD",
