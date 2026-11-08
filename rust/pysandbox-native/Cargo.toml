@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Stable-ABI wheels for CPython 3.12+. Free-threaded builds cannot use it, and
+# enabling it for them makes cross-compiles fall back to the host interpreter.
+abi3 = ["pyo3/abi3-py312"]
+
 [lib]
 name = "pysandbox_native"
 crate-type = ["cdylib"]

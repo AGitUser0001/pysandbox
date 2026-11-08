@@ -200,7 +200,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes llvm
           command -v llvm-lib
-      - name: Build wheels
+      - name: Build abi3 wheels
         uses: PyO3/maturin-action@v1
         env:
           MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
@@ -220,14 +220,37 @@ jobs:
             --out dist
             --interpreter
             '${{ steps.python.outputs.python312 }}'
+            ${{ matrix.platform.compatibility_args }}
+            ${{ matrix.platform.zig && '--zig' || '' }}
+            --features abi3
+            --manifest-path rust/pysandbox-native/Cargo.toml
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
+          XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
+        with:
+          # Docker builds delete Cargo's restored build-script artifacts before
+          # compiling. Zig supplies the requested glibc compatibility natively.
+          container: "off"
+          before-script-linux: |
+            mkdir -p "$GITHUB_WORKSPACE/.ci-tools"
+            cp "$(command -v maturin)" "$GITHUB_WORKSPACE/.ci-tools/maturin-v1.14.1"
+            chmod +x "$GITHUB_WORKSPACE/.ci-tools/maturin-v1.14.1"
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --interpreter
             '${{ steps.python.outputs.python314t }}'
             '${{ steps.python.outputs.python315t }}'
             ${{ matrix.platform.compatibility_args }}
             ${{ matrix.platform.zig && '--zig' || '' }}
             --manifest-path rust/pysandbox-native/Cargo.toml
-      - name: Verify free-threaded wheels
+      - name: Verify wheels
         run: |
-          for abi in cp314-cp314t cp315-cp315t; do
+          for abi in cp312-abi3 cp314-cp314t cp315-cp315t; do
             if ! compgen -G "dist/*-${abi}-*.whl" >/dev/null; then
               echo "::error::Maturin did not build a ${abi} wheel"
               exit 1
@@ -282,7 +305,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wheels-${{ matrix.platform.name }}
-      - name: Build wheels
+      - name: Build abi3 wheels
         uses: PyO3/maturin-action@v1
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment-target }}
@@ -293,6 +316,18 @@ jobs:
             --out dist
             --interpreter
             '${{ steps.python.outputs.python312 }}'
+            --features abi3
+            --manifest-path rust/pysandbox-native/Cargo.toml
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment-target }}
+        with:
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --interpreter
             '${{ steps.python.outputs.python314t }}'
             '${{ steps.python.outputs.python315t }}'
             --manifest-path rust/pysandbox-native/Cargo.toml
