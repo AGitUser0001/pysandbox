@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox-wasi"
-version = "1.6.5"
+version = "1.6.6"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,6 +34,7 @@ dependencies = [
     "installer>=0.7",
     "packaging>=24",
     "platformdirs>=4",
+    "pysandbox-wasi-core==1.6.6",
     "resolvelib>=1.1",
 ]
 
@@ -45,13 +46,17 @@ Issues = "https://github.com/AGitUser0001/pysandbox/issues"
 [build-system]
 requires = [
     "componentize-py",
-    "maturin>=1.14.1,<2",
+    "hatchling",
 ]
-build-backend = "maturin"
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+pysandbox-wasi-core = { path = "rust/pysandbox-native" }
 
 [dependency-groups]
 dev = [
   "componentize-py",
+  "hatchling",
   "pytest",
   "pytest-asyncio",
   "pytest-timeout",
@@ -64,29 +69,35 @@ addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
 timeout = 180
 
-[tool.maturin]
-manifest-path = "rust/pysandbox-native/Cargo.toml"
-module-name = "pysandbox._core"
-python-source = "."
-include = [
-    { path = "pysandbox.wasm", from = "out-dir", to = "pysandbox/_runtime/", crate-name = "pysandbox-native" },
-    { path = "runtime/**/*", from = "out-dir", to = "pysandbox/_runtime/", crate-name = "pysandbox-native" },
-    { path = "component/**/*", format = "sdist" },
-    { path = "vendor/cbor2/cbor2/**/*", format = "sdist" },
-    { path = "vendor/cbor2/pyproject.toml", format = "sdist" },
-    { path = "vendor/cpython/Lib/**/*", format = "sdist" },
-    { path = "vendor/cpython/LICENSE", format = "sdist" },
-    { path = "vendor/eryx-vfs/**/*", format = "sdist" },
-]
+[tool.hatch.build.targets.wheel]
+packages = ["pysandbox"]
+artifacts = ["pysandbox/_runtime"]
 
-[tool.maturin.generate-ci.github]
-trusted-publishing = true
-publishing-environment = "release"
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/pysandbox",
+    "/component",
+    "/rust",
+    "/vendor/cbor2/cbor2",
+    "/vendor/cbor2/pyproject.toml",
+    "/vendor/cpython/Lib",
+    "/vendor/cpython/LICENSE",
+    "/vendor/eryx-vfs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/hatch_build.py",
+]
+exclude = ["/component/pysandbox.wasm", "/pysandbox/_runtime"]
 
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "standard"
+extraPaths = ["rust/pysandbox-native"]
+reportMissingModuleSource = "none"
 pythonVersion = "3.12"
 exclude = [
     ".venv",

@@ -4,14 +4,6 @@ all-features = true
 [advisories]
 unmaintained = "workspace"
 
-# Temporary Wasmtime 50.0.1 transitive advisories.
-# Fixed upstream on main. Review/remove by 2026-11-25.
-ignore = [
-    { id = "RUSTSEC-2026-0391", reason = "Fixed in wasmtime main; waiting for next release/backport" },
-    { id = "RUSTSEC-2026-0398", reason = "Fixed in wasmtime main; waiting for next release/backport" },
-    { id = "RUSTSEC-2026-0403", reason = "Fixed in wasmtime main; waiting for next release/backport" },
-]
-
 [licenses]
 allow = [
     "0BSD",

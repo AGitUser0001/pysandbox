@@ -31,6 +31,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Check package versions match
+        run: |
+          python - <<'PY'
+          import tomllib
+
+          package = tomllib.load(open("pyproject.toml", "rb"))["project"]
+          core = tomllib.load(open("rust/pysandbox-native/pyproject.toml", "rb"))["project"]
+          pin = f"pysandbox-wasi-core=={package['version']}"
+          if core["version"] != package["version"] or pin not in package["dependencies"]:
+              raise SystemExit(
+                  f"pysandbox-wasi {package['version']}, pysandbox-wasi-core "
+                  f"{core['version']}, and the {pin!r} dependency must all agree"
+              )
+          PY
       - name: Validate release source
         if: ${{ inputs.release_tag != '' }}
         env:
@@ -72,7 +86,7 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install build and lint dependencies
-        run: uv sync --group dev --no-install-project
+        run: uv sync --group dev --no-install-project --no-install-package pysandbox-wasi-core
       - name: Check Python types
         run: npx pyright
       - name: Lint Python
@@ -118,7 +132,7 @@ jobs:
 
   wheels:
     name: Build ${{ matrix.platform.name }} wheels
-    needs: runtime
+    needs: preflight
     runs-on: ubuntu-22.04-arm
     env:
       # cargo-zigbuild includes its executable path in Cargo fingerprints. Keep
@@ -153,17 +167,14 @@ jobs:
           enable-cache: true
           cache-python: true
       - name: Install Python interpreters
-        run: uv python install 3.12 3.13 3.14 3.14t 3.15 3.15t
+        run: uv python install 3.12 3.14t 3.15t
       - name: Find Python interpreters
         id: python
         shell: bash
         run: |
           for entry in \
             python312=3.12 \
-            python313=3.13 \
-            python314=3.14 \
             python314t=3.14t \
-            python315=3.15 \
             python315t=3.15t
           do
             key=${entry%%=*}
@@ -189,15 +200,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes llvm
           command -v llvm-lib
-      - uses: actions/download-artifact@v7
-        with:
-          name: component-runtime
-          path: .pysandbox-runtime
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
-          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
           XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
         with:
           # Docker builds delete Cargo's restored build-script artifacts before
@@ -214,14 +220,10 @@ jobs:
             --out dist
             --interpreter
             '${{ steps.python.outputs.python312 }}'
-            '${{ steps.python.outputs.python313 }}'
-            '${{ steps.python.outputs.python314 }}'
             '${{ steps.python.outputs.python314t }}'
-            '${{ steps.python.outputs.python315 }}'
             '${{ steps.python.outputs.python315t }}'
             ${{ matrix.platform.compatibility_args }}
             ${{ matrix.platform.zig && '--zig' || '' }}
-            --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
       - name: Verify free-threaded wheels
         run: |
@@ -241,7 +243,7 @@ jobs:
   # needed to cross-link the Intel wheel.
   macos-wheels:
     name: Build ${{ matrix.platform.name }} wheels
-    needs: runtime
+    needs: preflight
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -262,17 +264,14 @@ jobs:
           enable-cache: true
           cache-python: true
       - name: Install Python interpreters
-        run: uv python install 3.12 3.13 3.14 3.14t 3.15 3.15t
+        run: uv python install 3.12 3.14t 3.15t
       - name: Find Python interpreters
         id: python
         shell: bash
         run: |
           for entry in \
             python312=3.12 \
-            python313=3.13 \
-            python314=3.14 \
             python314t=3.14t \
-            python315=3.15 \
             python315t=3.15t
           do
             key=${entry%%=*}
@@ -283,15 +282,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wheels-${{ matrix.platform.name }}
-      - uses: actions/download-artifact@v7
-        with:
-          name: component-runtime
-          path: .pysandbox-runtime
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment-target }}
-          PYSANDBOX_PREBUILT_RUNTIME: .pysandbox-runtime
         with:
           target: ${{ matrix.platform.target }}
           args: >-
@@ -299,12 +293,8 @@ jobs:
             --out dist
             --interpreter
             '${{ steps.python.outputs.python312 }}'
-            '${{ steps.python.outputs.python313 }}'
-            '${{ steps.python.outputs.python314 }}'
             '${{ steps.python.outputs.python314t }}'
-            '${{ steps.python.outputs.python315 }}'
             '${{ steps.python.outputs.python315t }}'
-            --no-default-features
             --manifest-path rust/pysandbox-native/Cargo.toml
       - name: Upload wheels
         uses: actions/upload-artifact@v6
@@ -312,11 +302,40 @@ jobs:
           name: wheels-${{ matrix.platform.name }}
           path: dist
 
+  main-package:
+    name: Build pysandbox-wasi
+    needs: runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.14"
+      - uses: actions/download-artifact@v7
+        with:
+          name: component-runtime
+          path: .pysandbox-runtime
+      - name: Build wheel and sdist
+        env:
+          # `uv build` builds the wheel from an unpacked sdist, so the path must be absolute.
+          PYSANDBOX_PREBUILT_RUNTIME: ${{ github.workspace }}/.pysandbox-runtime
+        run: uv build --out-dir dist
+      - name: Upload wheel and sdist
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-main
+          path: dist
+
   test-wheels:
     name: Test ${{ matrix.platform.label }} wheels
     needs:
       - wheels
       - macos-wheels
+      - main-package
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
@@ -367,6 +386,10 @@ jobs:
         with:
           name: wheels-${{ matrix.platform.name }}
           path: dist
+      - uses: actions/download-artifact@v7
+        with:
+          name: wheels-main
+          path: dist
       - name: Install wheel
         if: matrix.platform.regular
         id: regular_environment
@@ -378,7 +401,8 @@ jobs:
           uv pip install \
             --python .test-venv-312 \
             --prerelease allow \
-            dist/*-cp312-cp312-*.whl \
+            dist/pysandbox_wasi_core-*-cp312-abi3-*.whl \
+            dist/pysandbox_wasi-*-py3-none-any.whl \
             pytest pytest-asyncio pytest-timeout pytest-xdist
           if [[ "$RUNNER_OS" == Windows ]]; then
             python="$PWD/.test-venv-312/Scripts/python.exe"
@@ -404,7 +428,8 @@ jobs:
           uv pip install \
             --python .test-venv-314t \
             --prerelease allow \
-            dist/*-cp314-cp314t-*.whl \
+            dist/pysandbox_wasi_core-*-cp314-cp314t-*.whl \
+            dist/pysandbox_wasi-*-py3-none-any.whl \
             pytest pytest-asyncio pytest-timeout pytest-xdist
           if [[ "$RUNNER_OS" == Windows ]]; then
             python="$PWD/.test-venv-314t/Scripts/python.exe"
@@ -511,12 +536,18 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false
-      - name: Publish to PyPI
+      - name: Publish pysandbox-wasi-core to PyPI
         run: >-
           uv publish
           --trusted-publishing always
           --check-url https://pypi.org/simple/
-          "wheels-*/*"
+          "wheels-*/pysandbox_wasi_core-*"
+      - name: Publish pysandbox-wasi to PyPI
+        run: >-
+          uv publish
+          --trusted-publishing always
+          --check-url https://pypi.org/simple/
+          "wheels-*/pysandbox_wasi-*"
       - name: Ensure Git tag and GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -30,7 +30,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-pyo3::create_exception!(_core, WorkerStoppedError, PyRuntimeError);
+pyo3::create_exception!(pysandbox_core, WorkerStoppedError, PyRuntimeError);
 
 #[pyclass(frozen, get_all)]
 struct RpcContext {
@@ -549,9 +549,12 @@ fn spawn_connection_actor(
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
     let actor_shutdown = shutdown.clone();
     let connection_requests = requests.clone();
-    let (mut reader, mut writer) = connection.split();
+    // `&Stream` implements `AsyncRead` and `AsyncWrite`, so share it instead of splitting.
+    let connection = Arc::new(connection);
+    let reader_connection = connection.clone();
 
     tokio::spawn(async move {
+        let mut reader = &*reader_connection;
         loop {
             let frame = read_frame(&mut reader, max_ipc_frame_bytes)
                 .await
@@ -564,6 +567,7 @@ fn spawn_connection_actor(
     });
 
     tokio::spawn(async move {
+        let mut writer = &*connection;
         let mut pending = HashMap::<u64, PendingRequest>::new();
         let mut guest_dispatchers = HashMap::<u64, mpsc::Sender<HostDispatchRequest>>::new();
         let mut guest_dispatch_limits = HashMap::<u64, (usize, usize)>::new();
@@ -2083,7 +2087,7 @@ async fn wait_until_execution_ready(
 }
 
 #[derive(Eq, Hash, PartialEq)]
-#[pyclass(name = "OutputEvent", frozen, module = "pysandbox._core")]
+#[pyclass(name = "OutputEvent", frozen, module = "pysandbox_core")]
 struct NativeOutputEvent {
     source: &'static str,
     data: Vec<u8>,
@@ -2315,7 +2319,7 @@ fn validate_cpu_share_weight(weight: u64) -> PyResult<()> {
 }
 
 #[pymodule]
-fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn pysandbox_core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "WorkerStoppedError",
         module.py().get_type::<WorkerStoppedError>(),
