@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Concatenate, Protocol, overload
 
-from . import _core
+import pysandbox_core as _core
 
 __all__ = ["RpcContext", "RpcHandler", "RpcHost"]
 

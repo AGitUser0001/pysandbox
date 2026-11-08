@@ -7,7 +7,7 @@ Python asyncio application
         |
         | PyO3 awaitables
         v
-pysandbox._core (Rust supervisor in the application process)
+pysandbox_core (Rust supervisor in the application process)
         |
         | versioned CBOR frames over one local socket
         v
@@ -49,7 +49,8 @@ with the old process.
 
 ## Supervisor and Subprocess
 
-`pysandbox._core` is a PyO3 extension. It uses `pyo3-async-runtimes` to expose
+`pysandbox_core` is a PyO3 extension, shipped as the separate
+`pysandbox-wasi-core` package. It uses `pyo3-async-runtimes` to expose
 Tokio futures as Python awaitables without blocking the application's asyncio
 loop. It launches the packaged `_sandboxd` module with the current Python
 executable, connects to its local socket, and runs one connection actor.
@@ -252,21 +253,30 @@ explicitly enabled source build.
 
 `pysandbox-runtime-build` copies the vendored CPython standard library, excludes
 its test tree, adds pure-Python cbor2, builds the component, and compiles the
-runtime tree with the componentized interpreter. Maturin's native build script
-either generates those inputs or copies them from `PYSANDBOX_PREBUILT_RUNTIME`.
+runtime tree with the componentized interpreter. `pysandbox-wasi` is a pure
+Python wheel built with Hatchling; its build hook either generates those inputs
+or copies them from `PYSANDBOX_PREBUILT_RUNTIME`.
 
-CI builds the platform-independent component runtime once and reuses it for
-every wheel. Linux and Windows targets are cross-built on a Linux ARM runner;
-both macOS targets are built on a macOS ARM runner. The resulting wheels are
-then installed and tested on their native x86_64/ARM64 platforms with CPython
-3.12 and free-threaded 3.14. Native wheels remain specific to every supported
-CPython ABI, including free-threaded ABIs.
+The native extension is a separate package, `pysandbox-wasi-core`, built with
+Maturin. It does not contain the runtime, so the large platform-independent
+files are uploaded once per release instead of once per native wheel.
+`pysandbox-wasi` pins the exact matching `pysandbox-wasi-core` version.
+
+CI builds the component runtime once for the pure wheel. Native wheels use the
+stable ABI (`abi3`, CPython 3.12 and later) with separate wheels for the
+free-threaded 3.14 and 3.15 builds, which cannot use it. Linux and Windows
+targets are cross-built on a Linux ARM runner; both macOS targets are built on a
+macOS ARM runner. The resulting wheels are then installed with the pure wheel
+and tested on their native x86_64/ARM64 platforms with CPython 3.12 and
+free-threaded 3.14.
 
 Publishing is an explicitly dispatched workflow operation. Its selected commit
 and requested tag are validated before the matrix runs. After checks and native
 wheel tests pass, the protected `release` environment uses OIDC Trusted
 Publishing to upload attested artifacts to PyPI, then creates the matching Git
 tag and GitHub Release and attaches the wheels and reusable component runtime.
+`pysandbox-wasi-core` is published before `pysandbox-wasi` so the pinned
+dependency exists when the package that requires it appears.
 
 ## Trust Boundaries
 

@@ -13,9 +13,9 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Self, overload
 
+import pysandbox_core as _core
 from platformdirs import user_cache_path
 
-from . import _core
 from .packages import (
   DEFAULT_PACKAGE_CACHE,
   DEFAULT_PACKAGE_INDEX,

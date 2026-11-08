@@ -6,7 +6,7 @@ from pathlib import Path
 def main() -> None:
   ignore_terminal_signals()
 
-  from . import _core
+  import pysandbox_core as _core
 
   if len(sys.argv) != 13:
     raise SystemExit(

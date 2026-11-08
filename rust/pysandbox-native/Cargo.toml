@@ -7,8 +7,9 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["generate-runtime"]
-generate-runtime = ["dep:pysandbox-runtime-build"]
+# Stable-ABI wheels for CPython 3.12+. Free-threaded builds cannot use it, and
+# enabling it for them makes cross-compiles fall back to the host interpreter.
+abi3 = ["pyo3/abi3-py312"]
 
 [lib]
 name = "pysandbox_native"
@@ -23,6 +24,3 @@ pyo3-async-runtimes.workspace = true
 pysandbox-protocol = { path = "../pysandbox-protocol" }
 pysandbox-sandboxd = { path = "../pysandbox-sandboxd" }
 tokio.workspace = true
-
-[build-dependencies]
-pysandbox-runtime-build = { path = "../pysandbox-runtime-build", optional = true }

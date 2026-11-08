@@ -55,26 +55,29 @@ component runtime, RPC, limits, VFS, packages, concurrency, and recovery.
 
 ### Standard Build
 
-Build a wheel and source distribution through the configured Maturin backend
-with uv:
+The project is two packages. `pysandbox-wasi` (the repository root) is pure
+Python plus the WASI runtime, built with Hatchling. `pysandbox-wasi-core`
+(`rust/pysandbox-native/`) is the native `pysandbox_core` extension, built with
+Maturin. Build the pure wheel and source distribution with uv:
 
 ```sh
 uv build
 ```
 
-Or build only a wheel through pip's isolated PEP 517 build environment:
+and the native wheel with:
 
 ```sh
-python -m pip wheel . --wheel-dir dist
+uv build rust/pysandbox-native
 ```
 
-To build and install directly from the checkout:
+To install both from the checkout:
 
 ```sh
-python -m pip install .
+python -m pip install rust/pysandbox-native .
 ```
 
-The native build script generates two packaged runtime inputs:
+The runtime build hook in `hatch_build.py` generates two packaged runtime
+inputs:
 
 - `pysandbox.wasm`, the componentized Python guest
 - `runtime/`, the CPython standard library and guest dependencies mounted at
@@ -89,7 +92,7 @@ wheel.
 
 The component runtime is platform-independent. Download the
 `pysandbox-component-runtime-<tag>.tar.gz` asset from a GitHub Release, then
-extract it and point the native build at it:
+extract it and point the build at it:
 
 ```sh
 mkdir -p tmp/component-runtime
@@ -97,6 +100,9 @@ RELEASE_TAG="v$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.t
 tar -xzf "pysandbox-component-runtime-${RELEASE_TAG}.tar.gz" -C tmp/component-runtime
 PYSANDBOX_PREBUILT_RUNTIME="$PWD/tmp/component-runtime" uv build
 ```
+
+The path must be absolute, because the wheel is built from an unpacked source
+distribution.
 
 The pip equivalent is:
 
@@ -116,7 +122,7 @@ cargo run --release --package pysandbox-runtime-build -- target/pysandbox-runtim
 PYSANDBOX_PREBUILT_RUNTIME=target/pysandbox-runtime uv build
 ```
 
-CI uses this mechanism to build every native wheel from one shared WASI runtime
+CI uses this mechanism to build the pure wheel from one shared WASI runtime
 artifact.
 
 To rebuild only the component during guest development:
@@ -127,9 +133,10 @@ sh component/build.sh
 
 ## Repository Layout
 
-- `pysandbox/`: public Python facade and packaged native extension
+- `pysandbox/`: public Python facade and packaged WASI runtime
 - `component/`: componentized guest bootstrap and WIT interface
-- `rust/pysandbox-native/`: PyO3 supervisor and Python-facing async objects
+- `rust/pysandbox-native/`: `pysandbox-wasi-core`, the PyO3 supervisor and
+  Python-facing async objects
 - `rust/pysandbox-sandboxd/`: sandbox daemon, worker actors, Wasmtime host, and VFS
 - `rust/pysandbox-protocol/`: shared framed IPC protocol
 - `rust/pysandbox-runtime-build/`: component and standard-library generator
@@ -141,7 +148,9 @@ the runtime architecture.
 
 ## Releases
 
-Update the version in `pyproject.toml` and refresh `uv.lock`. Then manually run
+Update the version in `pyproject.toml` and `rust/pysandbox-native/pyproject.toml`,
+along with the `pysandbox-wasi-core==` pin in `pyproject.toml`, and refresh
+`uv.lock`. Preflight fails if the three disagree. Then manually run
 the `CI` workflow from the commit being released and set `release_tag` to the
 matching tag, such as `v1.5.1`. An ordinary push or pull-request run builds and
 tests artifacts but does not publish them.

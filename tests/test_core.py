@@ -4,9 +4,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pysandbox_core as _core
 import pytest
 
-from pysandbox import _core
 from pysandbox.rpc import RpcContext
 from pysandbox.runtime import TerminationReason, component_paths
 
