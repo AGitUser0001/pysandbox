@@ -33,7 +33,7 @@ const EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_FUEL_YIELD_INTERVAL: u64 = 10_000_000;
 
 wasmtime::component::bindgen!({
-    path: "../../component/wit",
+    path: "wit",
     world: "python",
     imports: {
         default: async,

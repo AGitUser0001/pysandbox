@@ -3,7 +3,7 @@ set -eu
 
 cd "$(dirname "$0")"
 uv run componentize-py \
-  -d wit \
+  -d ../rust/pysandbox-sandboxd/wit \
   -w python \
   componentize main \
   -p src \

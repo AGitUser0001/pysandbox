@@ -85,7 +85,7 @@ Request IDs route concurrent responses without serializing unrelated workers.
 ## Component Runtime
 
 The guest in `component/src/main.py` is built by `componentize-py` against
-`component/wit/pysandbox.wit`. Its exported async `run` function obtains one
+`rust/pysandbox-sandboxd/wit/pysandbox.wit`. Its exported async `run` function obtains one
 program from the host, compiles it with `PyCF_ALLOW_TOP_LEVEL_AWAIT`, and
 evaluates it in a persistent `types.ModuleType("__main__")`. The module is also
 installed in `sys.modules`, so importing `__main__` observes the same namespace.

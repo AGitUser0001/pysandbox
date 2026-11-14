@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox-wasi-core"
-version = "1.6.6"
+version = "1.6.7"
 description = "Native Wasmtime extension for pysandbox-wasi."
 readme = "README.md"
 license = "Apache-2.0"

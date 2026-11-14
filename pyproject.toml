@@ -1,6 +1,6 @@
 [project]
 name = "pysandbox-wasi"
-version = "1.6.6"
+version = "1.6.7"
 description = "A Wasmtime-backed Python sandbox with RPC support."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,7 +34,7 @@ dependencies = [
     "installer>=0.7",
     "packaging>=24",
     "platformdirs>=4",
-    "pysandbox-wasi-core==1.6.6",
+    "pysandbox-wasi-core==1.6.7",
     "resolvelib>=1.1",
 ]
 

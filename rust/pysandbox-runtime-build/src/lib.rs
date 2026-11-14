@@ -31,17 +31,9 @@ pub fn generate(project_root: &Path, output_root: &Path) {
     let executable = componentize_py(project_root);
     let status = Command::new(&executable)
         .current_dir(&component_root)
-        .args([
-            "-d",
-            "wit",
-            "-w",
-            "python",
-            "componentize",
-            "main",
-            "-p",
-            "src",
-            "-o",
-        ])
+        .arg("-d")
+        .arg(project_root.join("rust/pysandbox-sandboxd/wit"))
+        .args(["-w", "python", "componentize", "main", "-p", "src", "-o"])
         .arg(&component_output)
         .status()
         .unwrap_or_else(|error| {
