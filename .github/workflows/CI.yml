@@ -167,7 +167,7 @@ jobs:
           enable-cache: true
           cache-python: true
       - name: Install Python interpreters
-        run: uv python install 3.12 3.14t 3.15t
+        run: uv python install 3.12 3.14t 3.15
       - name: Find Python interpreters
         id: python
         shell: bash
@@ -175,7 +175,7 @@ jobs:
           for entry in \
             python312=3.12 \
             python314t=3.14t \
-            python315t=3.15t
+            python315=3.15
           do
             key=${entry%%=*}
             version=${entry#*=}
@@ -224,7 +224,7 @@ jobs:
             ${{ matrix.platform.zig && '--zig' || '' }}
             --features abi3
             --manifest-path rust/pysandbox-native/Cargo.toml
-      - name: Build free-threaded wheels
+      - name: Build free-threaded wheel
         uses: PyO3/maturin-action@v1
         env:
           MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
@@ -244,13 +244,36 @@ jobs:
             --out dist
             --interpreter
             '${{ steps.python.outputs.python314t }}'
-            '${{ steps.python.outputs.python315t }}'
             ${{ matrix.platform.compatibility_args }}
             ${{ matrix.platform.zig && '--zig' || '' }}
             --manifest-path rust/pysandbox-native/Cargo.toml
+      - name: Build abi3t wheel
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_USE_XWIN: ${{ startsWith(matrix.platform.name, 'windows-') && '1' || '' }}
+          XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
+        with:
+          # Docker builds delete Cargo's restored build-script artifacts before
+          # compiling. Zig supplies the requested glibc compatibility natively.
+          container: "off"
+          before-script-linux: |
+            mkdir -p "$GITHUB_WORKSPACE/.ci-tools"
+            cp "$(command -v maturin)" "$GITHUB_WORKSPACE/.ci-tools/maturin-v1.14.1"
+            chmod +x "$GITHUB_WORKSPACE/.ci-tools/maturin-v1.14.1"
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --interpreter
+            '${{ steps.python.outputs.python315 }}'
+            ${{ matrix.platform.compatibility_args }}
+            ${{ matrix.platform.zig && '--zig' || '' }}
+            --features abi3t
+            --manifest-path rust/pysandbox-native/Cargo.toml
       - name: Verify wheels
         run: |
-          for abi in cp312-abi3 cp314-cp314t cp315-cp315t; do
+          for abi in cp312-abi3 cp314-cp314t cp315-abi3.abi3t; do
             if ! compgen -G "dist/*-${abi}-*.whl" >/dev/null; then
               echo "::error::Maturin did not build a ${abi} wheel"
               exit 1
@@ -287,7 +310,7 @@ jobs:
           enable-cache: true
           cache-python: true
       - name: Install Python interpreters
-        run: uv python install 3.12 3.14t 3.15t
+        run: uv python install 3.12 3.14t 3.15
       - name: Find Python interpreters
         id: python
         shell: bash
@@ -295,7 +318,7 @@ jobs:
           for entry in \
             python312=3.12 \
             python314t=3.14t \
-            python315t=3.15t
+            python315=3.15
           do
             key=${entry%%=*}
             version=${entry#*=}
@@ -318,7 +341,7 @@ jobs:
             '${{ steps.python.outputs.python312 }}'
             --features abi3
             --manifest-path rust/pysandbox-native/Cargo.toml
-      - name: Build free-threaded wheels
+      - name: Build free-threaded wheel
         uses: PyO3/maturin-action@v1
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment-target }}
@@ -329,8 +352,96 @@ jobs:
             --out dist
             --interpreter
             '${{ steps.python.outputs.python314t }}'
-            '${{ steps.python.outputs.python315t }}'
             --manifest-path rust/pysandbox-native/Cargo.toml
+      - name: Build abi3t wheel
+        uses: PyO3/maturin-action@v1
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.deployment-target }}
+        with:
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --out dist
+            --interpreter
+            '${{ steps.python.outputs.python315 }}'
+            --features abi3t
+            --manifest-path rust/pysandbox-native/Cargo.toml
+      - name: Upload wheels
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: dist
+
+  # Android wheels (PEP 738) for Termux and other CPython 3.13+ Android builds.
+  # Only the abi3 wheel is built: it covers every supported GIL-enabled version.
+  android-wheels:
+    name: Build ${{ matrix.platform.name }} wheels
+    needs: preflight
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API_LEVEL: "24"
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: android-aarch64
+            target: aarch64-linux-android
+            abi: arm64_v8a
+          - name: android-x86_64
+            target: x86_64-linux-android
+            abi: x86_64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-python: true
+      - name: Install Python interpreter
+        run: uv python install 3.12
+      - name: Find Python interpreter
+        id: python
+        run: echo "python312=$(uv python find --managed-python 3.12)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wheels-${{ matrix.platform.name }}
+      - name: Configure Android NDK toolchain
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          target='${{ matrix.platform.target }}'
+          clang="$bin/${target}${ANDROID_API_LEVEL}-clang"
+          lower="${target//-/_}"
+          upper="$(echo "$lower" | tr '[:lower:]' '[:upper:]')"
+          {
+            echo "CC_${lower}=$clang"
+            echo "AR_${lower}=$bin/llvm-ar"
+            echo "CARGO_TARGET_${upper}_LINKER=$clang"
+          } >> "$GITHUB_ENV"
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          manylinux: "off"
+          args: >-
+            --release
+            --out dist
+            --interpreter
+            '${{ steps.python.outputs.python312 }}'
+            --features abi3
+            --manifest-path rust/pysandbox-native/Cargo.toml
+      - name: Verify wheel
+        run: |
+          ls -l dist
+          if ! compgen -G "dist/*-cp312-abi3-android_${ANDROID_API_LEVEL}_${{ matrix.platform.abi }}.whl" >/dev/null; then
+            echo "::error::Maturin did not build a cp312-abi3 android_${ANDROID_API_LEVEL}_${{ matrix.platform.abi }} wheel"
+            exit 1
+          fi
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -482,6 +593,36 @@ jobs:
           &&
           '${{ steps.freethreaded_environment.outputs.python }}'
           -m pytest -n auto --dist worksteal .
+      - name: Install abi3t wheel
+        if: matrix.platform.freethreaded
+        id: abi3t_environment
+        shell: bash
+        env:
+          PYTHON_REQUEST: ${{ matrix.platform.name == 'windows-aarch64' && '3.15t-aarch64' || '3.15t' }}
+        run: |
+          uv venv --python "$PYTHON_REQUEST" .test-venv-315t
+          uv pip install \
+            --python .test-venv-315t \
+            --prerelease allow \
+            dist/pysandbox_wasi_core-*-cp315-abi3.abi3t-*.whl \
+            dist/pysandbox_wasi-*-py3-none-any.whl \
+            pytest pytest-asyncio pytest-timeout pytest-xdist
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python="$PWD/.test-venv-315t/Scripts/python.exe"
+          else
+            python="$PWD/.test-venv-315t/bin/python"
+          fi
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+      - name: Test abi3t wheel
+        if: matrix.platform.freethreaded
+        working-directory: tests
+        shell: bash
+        run: >-
+          '${{ steps.abi3t_environment.outputs.python }}'
+          -c 'import sys, pysandbox; assert not sys._is_gil_enabled()'
+          &&
+          '${{ steps.abi3t_environment.outputs.python }}'
+          -m pytest -n auto --dist worksteal .
 
   sdist:
     needs: preflight
@@ -510,6 +651,7 @@ jobs:
     needs:
       - checks
       - test-wheels
+      - android-wheels
       - sdist
     environment: release
     permissions:
@@ -567,22 +709,23 @@ jobs:
               exit 1
             fi
           fi
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
+      - name: Collect distributions
+        run: |
+          mkdir dist-core dist-main
+          cp wheels-*/pysandbox_wasi_core-* dist-core/
+          cp wheels-*/pysandbox_wasi-* dist-main/
+      # Core first, so the pinned dependency exists before the package that
+      # requires it. Trusted publishing also uploads PEP 740 attestations.
       - name: Publish pysandbox-wasi-core to PyPI
-        run: >-
-          uv publish
-          --trusted-publishing always
-          --check-url https://pypi.org/simple/
-          "wheels-*/pysandbox_wasi_core-*"
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-core/
+          skip-existing: true
       - name: Publish pysandbox-wasi to PyPI
-        run: >-
-          uv publish
-          --trusted-publishing always
-          --check-url https://pypi.org/simple/
-          "wheels-*/pysandbox_wasi-*"
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-main/
+          skip-existing: true
       - name: Ensure Git tag and GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

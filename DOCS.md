@@ -263,18 +263,24 @@ files are uploaded once per release instead of once per native wheel.
 `pysandbox-wasi` pins the exact matching `pysandbox-wasi-core` version.
 
 CI builds the component runtime once for the pure wheel. Native wheels use the
-stable ABI (`abi3`, CPython 3.12 and later) with separate wheels for the
-free-threaded 3.14 and 3.15 builds, which cannot use it. Linux and Windows
-targets are cross-built on a Linux ARM runner; both macOS targets are built on a
-macOS ARM runner. The resulting wheels are then installed with the pure wheel
-and tested on their native x86_64/ARM64 platforms with CPython 3.12 and
-free-threaded 3.14.
+stable ABIs: `abi3` for GIL-enabled CPython 3.12 and later, and `abi3t` for
+CPython 3.15 and later, which both GIL-enabled and free-threaded builds can
+load. Free-threaded 3.14 has no stable ABI and gets its own wheel. Linux and
+Windows targets are cross-built on a Linux ARM runner; both macOS targets are
+built on a macOS ARM runner. The resulting wheels are then installed with the
+pure wheel and tested on their native x86_64/ARM64 platforms with CPython 3.12,
+free-threaded 3.14, and free-threaded 3.15.
+
+Android wheels (PEP 738, API level 24, `arm64_v8a` and `x86_64`) are
+cross-built from Linux with the Android NDK as `abi3` wheels. They are not run
+in CI; they target CPython 3.13 and later on Android, such as Termux.
 
 Publishing is an explicitly dispatched workflow operation. Its selected commit
 and requested tag are validated before the matrix runs. After checks and native
 wheel tests pass, the protected `release` environment uses OIDC Trusted
-Publishing to upload attested artifacts to PyPI, then creates the matching Git
-tag and GitHub Release and attaches the wheels and reusable component runtime.
+Publishing, through `pypa/gh-action-pypi-publish`, to upload the distributions
+with PEP 740 attestations to PyPI, then creates the matching Git tag and GitHub
+Release and attaches the wheels and reusable component runtime.
 `pysandbox-wasi-core` is published before `pysandbox-wasi` so the pinned
 dependency exists when the package that requires it appears.
 

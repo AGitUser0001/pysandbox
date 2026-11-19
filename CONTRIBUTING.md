@@ -164,6 +164,6 @@ again before publishing.
 The `release` GitHub environment requires approval and holds the publishing
 boundary. No PyPI token is stored in the repository. After approval, the job
 attests and publishes the artifacts to PyPI through OIDC Trusted Publishing,
-creates the Git tag and GitHub Release when absent, and attaches the wheels and
+including PyPI provenance attestations, creates the Git tag and GitHub Release when absent, and attaches the wheels and
 component-runtime archive. A failed release can be retried by dispatching the
 same commit with the same `release_tag`.
