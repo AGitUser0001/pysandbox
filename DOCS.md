@@ -268,8 +268,9 @@ CPython 3.15 and later, which both GIL-enabled and free-threaded builds can
 load. Free-threaded 3.14 has no stable ABI and gets its own wheel. Linux and
 Windows targets are cross-built on a Linux ARM runner; both macOS targets are
 built on a macOS ARM runner. The resulting wheels are then installed with the
-pure wheel and tested on their native x86_64/ARM64 platforms with CPython 3.12,
-free-threaded 3.14, and free-threaded 3.15.
+pure wheel and tested on their native x86_64/ARM64 platforms with CPython 3.12
+and free-threaded 3.14. The `abi3t` wheel is built and checked for its tag but
+not run separately.
 
 Android wheels (PEP 738, API level 24, `arm64_v8a` and `x86_64`) are
 cross-built from Linux with the Android NDK as `abi3` wheels. They are not run
