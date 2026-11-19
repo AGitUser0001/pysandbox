@@ -34,7 +34,7 @@ dependencies = [
     "installer>=0.7",
     "packaging>=24",
     "platformdirs>=4",
-    "pysandbox-wasi-core==1.6.7",
+    "pysandbox-wasi-core==1.6.8",
     "resolvelib>=1.1",
 ]
 

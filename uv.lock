@@ -217,7 +217,7 @@ wheels = [
 
 [[package]]
 name = "pysandbox-wasi"
-version = "1.6.7"
+version = "1.6.8"
 source = { editable = "." }
 dependencies = [
     { name = "build", extra = ["virtualenv"] },
@@ -264,7 +264,7 @@ dev = [
 
 [[package]]
 name = "pysandbox-wasi-core"
-version = "1.6.7"
+version = "1.6.8"
 source = { directory = "rust/pysandbox-native" }
 
 [[package]]
